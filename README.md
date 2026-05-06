@@ -326,8 +326,16 @@ pytest
 - 支持更稳定的任务队列，例如 Redis/Celery
 - 可选增加用户认证与多用户数据隔离
 
+## 致谢
+
+本项目的初始项目结构参考了开源项目 [serkanyasr/agentic_rag_project](https://github.com/serkanyasr/agentic_rag_project)，该项目基于 MIT License 发布。
+
+在此基础上，本项目已围绕科研论文阅读场景进行了较大幅度的重构与扩展，包括 LangChain / LangGraph Agent 工作流、会话历史与长对话摘要压缩、OpenAlex 学术检索、可选通用网页搜索、前端 PDF 上传入库、入库进度与取消任务、证据来源展示等功能。
+
+原项目的 MIT License 与版权声明已保留。
 ---
 
 ## License
 
 MIT License
+
