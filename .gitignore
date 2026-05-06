@@ -1,0 +1,37 @@
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# local IDE
+.vscode/
+.idea/
+
+# local smoke tests
+test_bocha.py
+
+# local documents / uploaded files
+documents/*
+!documents/.gitkeep
+
+# python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# database / volumes
+postgres_data/
+pgdata/
+*.db
+*.sqlite
+*.sqlite3
+
+# logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db

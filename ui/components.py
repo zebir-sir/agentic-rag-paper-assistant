@@ -1,0 +1,228 @@
+import html
+from typing import Any, Callable, Dict, List
+
+import streamlit as st
+
+try:
+    from ui.display_utils import clean_snippet_text, make_friendly_title, localize_paper_terms
+    from ui.prompt_templates import (
+        build_multi_experiment_compare_prompt,
+        build_multi_method_compare_prompt,
+        build_multi_problem_compare_prompt,
+        build_multi_value_compare_prompt,
+        build_single_experiment_prompt,
+        build_single_innovation_prompt,
+        build_single_inspiration_prompt,
+        build_single_limitation_prompt,
+        build_single_method_prompt,
+        build_single_summary_prompt,
+    )
+    from ui.title_aliases import get_title_alias
+except ImportError:  # pragma: no cover - streamlit script mode
+    from display_utils import clean_snippet_text, make_friendly_title, localize_paper_terms
+    from prompt_templates import (
+        build_multi_experiment_compare_prompt,
+        build_multi_method_compare_prompt,
+        build_multi_problem_compare_prompt,
+        build_multi_value_compare_prompt,
+        build_single_experiment_prompt,
+        build_single_innovation_prompt,
+        build_single_inspiration_prompt,
+        build_single_limitation_prompt,
+        build_single_method_prompt,
+        build_single_summary_prompt,
+    )
+    from title_aliases import get_title_alias
+
+
+def inject_styles() -> None:
+    st.markdown(
+        """
+<style>
+.stChatMessage h1 {font-size: 1.45rem !important; line-height: 1.35 !important;}
+.stChatMessage h2 {font-size: 1.25rem !important; line-height: 1.35 !important;}
+.stChatMessage h3 {font-size: 1.12rem !important; line-height: 1.35 !important;}
+.stChatMessage p, .stChatMessage li {font-size: 1rem !important; line-height: 1.75 !important;}
+.source-snippet {
+    font-size: 0.92rem;
+    line-height: 1.55;
+    color: #4b5563;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: #f8fafc;
+    border-radius: 0.5rem;
+    padding: 0.6rem 0.75rem;
+    margin-top: 0.35rem;
+}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def _normalize_sources(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized = []
+    for source in sources:
+        metadata = source.get("metadata") or {}
+        source_type = str(source.get("source_type") or metadata.get("source_type") or "local").lower()
+        source_type = "web" if source_type == "web" else "local"
+        normalized.append({**source, "source_type": source_type, "metadata": metadata})
+    return normalized
+
+
+def render_plain_snippet(snippet: str) -> None:
+    safe = html.escape(snippet or "")
+    st.markdown(f"<div class='source-snippet'>{safe}</div>", unsafe_allow_html=True)
+
+
+def _source_title(source: Dict[str, Any]) -> str:
+    raw_title = source.get("document_title") or ""
+    raw_source = source.get("document_source") or ""
+    alias_title = get_title_alias(raw_title, raw_source, source.get("document_id"))
+    return alias_title or make_friendly_title(raw_title, raw_source) or "论文"
+
+
+def render_sources(
+    sources: List[Dict[str, Any]],
+    base_url: str,
+    key_prefix: str,
+    add_openalex_source_to_kb: Callable[[str, Dict[str, Any]], tuple[bool, str]],
+) -> None:
+    if not sources:
+        return
+
+    normalized = _normalize_sources(sources)
+    local_sources = [s for s in normalized if s["source_type"] == "local"]
+    web_sources = [s for s in normalized if s["source_type"] == "web"]
+
+    with st.expander("依据片段", expanded=False):
+        if local_sources:
+            st.markdown("#### 本地知识库")
+            for idx, source in enumerate(local_sources, start=1):
+                metadata = source.get("metadata") or {}
+                title = _source_title(source)
+                snippet = clean_snippet_text(source.get("snippet") or "", max_len=320)
+                score = source.get("score")
+                score_text = f"（相似度: {score:.3f}）" if isinstance(score, (int, float)) else ""
+
+                st.markdown(f"**{idx}. {title}** {score_text}")
+                raw_source = source.get("document_source") or ""
+                if raw_source:
+                    st.caption(f"来源: {localize_paper_terms(raw_source)}")
+                render_plain_snippet(snippet)
+                if metadata.get("doi"):
+                    st.caption(f"DOI: {metadata.get('doi')}")
+                st.divider()
+
+        if web_sources:
+            st.markdown("#### 联网搜索")
+            for idx, source in enumerate(web_sources, start=1):
+                metadata = source.get("metadata") or {}
+                source_kind = str(metadata.get("source_kind") or "").lower()
+                title = _source_title(source)
+                snippet = clean_snippet_text(source.get("snippet") or "", max_len=320)
+
+                st.markdown(f"**{idx}. {title}**")
+                if source_kind == "general_web":
+                    st.caption("来源类型：网页搜索")
+                elif source_kind == "openalex":
+                    st.caption("来源类型：OpenAlex 论文检索")
+                    st.caption("说明：该依据通常基于论文元数据与摘要片段，可能不是全文。")
+                else:
+                    st.caption("来源类型：联网搜索")
+
+                authors = metadata.get("authors") or []
+                year = metadata.get("year")
+                if authors:
+                    text = "、".join(authors[:4]) + (" 等" if len(authors) > 4 else "")
+                    st.caption(f"作者: {text}")
+                if year:
+                    st.caption(f"年份: {year}")
+                if metadata.get("doi"):
+                    st.markdown(f"DOI: `{metadata.get('doi')}`")
+                if metadata.get("landing_page_url"):
+                    st.markdown(f"[查看来源链接]({metadata.get('landing_page_url')})")
+                if metadata.get("is_oa") is not None:
+                    st.caption(f"开放获取: {'是' if bool(metadata.get('is_oa')) else '否'}")
+
+                render_plain_snippet(snippet)
+
+                pdf_url = metadata.get("pdf_url") or metadata.get("content_url")
+                btn_key = f"{key_prefix}_add_{idx}_{source.get('document_id')}"
+                if st.button("加入知识库", key=btn_key, disabled=not bool(pdf_url)):
+                    ok, msg = add_openalex_source_to_kb(base_url, source)
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+                if not pdf_url:
+                    st.caption("仅可查看来源：没有可用的 PDF/content 链接。")
+                st.divider()
+
+
+def render_analysis_panel(
+    base_url: str,
+    backend_health_ok: bool,
+    fetch_documents: Callable[[str], List[Dict[str, Any]]],
+    set_pending_prompt: Callable[[str], None],
+) -> None:
+    st.markdown("### 论文分析面板")
+    mode = st.radio("阅读模式", options=["单篇分析", "多篇对比"], horizontal=True)
+    if not backend_health_ok:
+        st.warning("当前无法连接后端接口，请先检查接口地址或服务状态。")
+        return
+
+    documents = fetch_documents(base_url)
+    if not documents:
+        st.info("当前知识库暂无可用论文，请先导入文档。")
+        return
+
+    doc_map: Dict[str, Dict[str, Any]] = {}
+    options: List[str] = []
+    for doc in documents:
+        doc_id = str(doc.get("id") or "")
+        if doc_id:
+            options.append(doc_id)
+            doc_map[doc_id] = doc
+    if not options:
+        st.info("当前知识库暂无可用论文，请先导入文档。")
+        return
+
+    def fmt(doc_id: str) -> str:
+        doc = doc_map.get(doc_id, {})
+        alias = get_title_alias(doc.get("title", ""), doc.get("source", ""), doc.get("id", ""))
+        return alias or make_friendly_title(doc.get("title", ""), doc.get("source", ""))
+
+    if mode == "单篇分析":
+        selected_doc_id = st.selectbox(
+            "选择论文",
+            options=[""] + options,
+            format_func=lambda value: "请选择论文" if value == "" else fmt(value),
+        )
+        selected_title = fmt(selected_doc_id) if selected_doc_id else ""
+        col1, col2, col3 = st.columns(3)
+        col4, col5, col6 = st.columns(3)
+        if col1.button("快速总结", use_container_width=True):
+            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_summary_prompt(selected_title))
+        if col2.button("创新点分析", use_container_width=True):
+            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_innovation_prompt(selected_title))
+        if col3.button("方法流程", use_container_width=True):
+            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_method_prompt(selected_title))
+        if col4.button("实验解读", use_container_width=True):
+            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_experiment_prompt(selected_title))
+        if col5.button("局限性分析", use_container_width=True):
+            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_limitation_prompt(selected_title))
+        if col6.button("对我研究的启发", use_container_width=True):
+            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_inspiration_prompt(selected_title))
+    else:
+        selected_doc_ids = st.multiselect("选择论文（2~3 篇）", options=options, format_func=fmt, max_selections=3)
+        selected_titles = [fmt(doc_id) for doc_id in selected_doc_ids]
+        c1, c2, c3, c4 = st.columns(4)
+        if c1.button("核心问题对比", use_container_width=True):
+            st.warning("多篇对比至少选择 2 篇论文。") if len(selected_titles) < 2 else set_pending_prompt(build_multi_problem_compare_prompt(selected_titles))
+        if c2.button("方法与创新点对比", use_container_width=True):
+            st.warning("多篇对比至少选择 2 篇论文。") if len(selected_titles) < 2 else set_pending_prompt(build_multi_method_compare_prompt(selected_titles))
+        if c3.button("实验与结果对比", use_container_width=True):
+            st.warning("多篇对比至少选择 2 篇论文。") if len(selected_titles) < 2 else set_pending_prompt(build_multi_experiment_compare_prompt(selected_titles))
+        if c4.button("适用场景与借鉴价值", use_container_width=True):
+            st.warning("多篇对比至少选择 2 篇论文。") if len(selected_titles) < 2 else set_pending_prompt(build_multi_value_compare_prompt(selected_titles))
