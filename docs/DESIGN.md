@@ -1,0 +1,65 @@
+# Design Notes
+
+## 1. 项目定位
+本项目不是简单聊天机器人，而是面向复杂文档场景的 Agentic RAG 系统。核心关注点是：
+- 多源检索
+- 检索不足时的自我修正
+- 章节级证据定位
+- 可评测的 RAG 工程链路
+
+## 2. Source Selection Policy
+不同来源的职责边界如下：
+- Local Knowledge Base：用户上传 PDF 论文的本地全文证据
+- Section Search：用户要求特定章节（如 Abstract/Method/Experiments/References）时使用
+- OpenAlex：related work、作者、年份、DOI、venue、开放获取链接等学术元数据检索
+- General Web Search：普通网页资料、最新信息、非论文来源问题
+
+约束：不能把本地论文中提取的 References 片段冒充为联网实时结果；如使用本地 References，应明确标注来源。
+
+## 3. Why LangGraph
+相比简单链式 RAG，本项目采用 LangGraph 的原因是：
+- 复杂问题下，初次检索可能不足
+- 需要在流程中显式支持 retrieval evaluation / query rewrite / retry retrieval
+- 工作流节点化后更可控，也更方便调试与评测
+
+## 4. Why Section-aware Chunking
+固定长度切块在论文场景常见问题：
+- 章节边界被打断
+- 方法、实验、结论内容容易混杂
+- evidence 难以稳定定位
+
+当前实现做法：
+- 基于 Docling 产出的 Markdown heading 识别 section
+- 记录 `section_title` / `section_path_text` / `section_chunk_index` 等 metadata
+- 在 chunk content 注入 `[Section: ...]` 前缀，提升检索可见性
+
+## 5. Retrieval Strategy
+- vector search：更偏语义召回
+- hybrid search：兼顾语义与关键词
+- section_search：适合“只看 Abstract / Experiments / References”等章节限定问题
+- OpenAlex / Web Search：用于本地语料之外的外部扩展检索
+
+## 6. Evaluation
+当前轻量评测结果（真实运行结果）：
+- Retrieval Eval: `Doc Hit@5 = 1.00`, `Section Hit@5 = 0.73`, `Avg Keyword Recall@5 = 0.78`
+- Section Eval A/B: `Section Search Precision@5 = 0.60`, `Hybrid Search = 0.42`, `Order OK Rate = 1.00 vs 0.00`
+- Retrieval Loop Eval: `Rewrite Used Rate = 0.60`, `Avg Retrieval Attempts = 1.60`
+
+解释：
+- section_search 并不全面替代 hybrid_search
+- 两者适用场景不同：章节定位 vs 全局覆盖
+- 该 eval 是轻量项目评测，不是大规模 benchmark
+
+## 7. Current Limitations
+- PDF 解析依赖 Docling，复杂排版可能影响章节识别
+- 入库任务状态当前在进程内存中，服务重启会丢失
+- Web Search 依赖第三方 provider/API key
+- OpenAlex 主要提供元数据，不等于全文论文证据
+- 当前未做多用户鉴权和数据隔离
+
+## 8. Future Work
+- page-level evidence（页级证据定位）
+- Redis/Celery 持久任务队列
+- 更大规模评测集
+- API routes/services 拆分
+- 多用户认证与数据隔离

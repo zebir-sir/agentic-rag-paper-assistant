@@ -34,6 +34,9 @@
 ## 📌 项目简介
 
 **Agentic RAG Paper Assistant** 是一个以科研论文阅读为核心、同时支持开放域网页检索的 Agentic RAG 系统。用户可以上传 PDF 论文，系统自动完成 Docling 解析、章节感知切块、embedding 入库，并通过 Agent 工具完成论文总结、方法拆解、实验解读、创新点分析和多篇论文对比。
+本项目重点探索复杂文档场景下的多源检索、检索自我修正、章节级证据定位与可评测 RAG 工程化落地。
+
+📐 设计说明：[docs/DESIGN.md](docs/DESIGN.md)
 
 系统同时支持三类外部/内部知识来源：
 
