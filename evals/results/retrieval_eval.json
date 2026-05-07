@@ -1,0 +1,178 @@
+{
+  "summary": {
+    "total_cases": 15,
+    "doc_hit_at_1": 0.7333333333333333,
+    "doc_hit_at_k": 1.0,
+    "section_hit_at_k": 0.7333333333333333,
+    "avg_keyword_recall_at_k": 0.7777777777777778,
+    "limit": 5,
+    "text_weight": 0.3
+  },
+  "cases": [
+    {
+      "id": "retrieval_001",
+      "query": "Hybrid-RRT 的混合采样机制是什么？",
+      "limit": 5,
+      "doc_hit_at_1": true,
+      "doc_hit_at_k": true,
+      "section_hit_at_k": false,
+      "keyword_recall_at_k": 1.0,
+      "result_count": 5,
+      "error": null
+    },
+    {
+      "id": "retrieval_002",
+      "query": "Hybrid-RRT 如何平衡 exploration 和 exploitation？",
+      "limit": 5,
+      "doc_hit_at_1": true,
+      "doc_hit_at_k": true,
+      "section_hit_at_k": true,
+      "keyword_recall_at_k": 1.0,
+      "result_count": 5,
+      "error": null
+    },
+    {
+      "id": "retrieval_003",
+      "query": "HA-RRT 的启发式策略主要改进了什么？",
+      "limit": 5,
+      "doc_hit_at_1": false,
+      "doc_hit_at_k": true,
+      "section_hit_at_k": true,
+      "keyword_recall_at_k": 1.0,
+      "result_count": 5,
+      "error": null
+    },
+    {
+      "id": "retrieval_004",
+      "query": "HMA-RRT 的 multi-strategy adaptive 机制是怎样的？",
+      "limit": 5,
+      "doc_hit_at_1": true,
+      "doc_hit_at_k": true,
+      "section_hit_at_k": true,
+      "keyword_recall_at_k": 1.0,
+      "result_count": 5,
+      "error": null
+    },
+    {
+      "id": "retrieval_005",
+      "query": "三篇论文中哪篇更强调 USV 或 ship path planning 场景？",
+      "limit": 5,
+      "doc_hit_at_1": true,
+      "doc_hit_at_k": true,
+      "section_hit_at_k": false,
+      "keyword_recall_at_k": 1.0,
+      "result_count": 5,
+      "error": null
+    },
+    {
+      "id": "retrieval_006",
+      "query": "Hybrid-RRT 的实验设置包括哪些地图或障碍环境？",
+      "limit": 5,
+      "doc_hit_at_1": true,
+      "doc_hit_at_k": true,
+      "section_hit_at_k": true,
+      "keyword_recall_at_k": 0.6666666666666666,
+      "result_count": 5,
+      "error": null
+    },
+    {
+      "id": "retrieval_007",
+      "query": "HA-RRT 的算法伪代码在哪些章节提到？",
+      "limit": 5,
+      "doc_hit_at_1": false,
+      "doc_hit_at_k": true,
+      "section_hit_at_k": true,
+      "keyword_recall_at_k": 0.6666666666666666,
+      "result_count": 5,
+      "error": null
+    },
+    {
+      "id": "retrieval_008",
+      "query": "HMA-RRT 的核心贡献是什么？",
+      "limit": 5,
+      "doc_hit_at_1": true,
+      "doc_hit_at_k": true,
+      "section_hit_at_k": true,
+      "keyword_recall_at_k": 0.6666666666666666,
+      "result_count": 5,
+      "error": null
+    },
+    {
+      "id": "retrieval_009",
+      "query": "Hybrid-RRT 相比传统 RRT* 的优势有哪些？",
+      "limit": 5,
+      "doc_hit_at_1": true,
+      "doc_hit_at_k": true,
+      "section_hit_at_k": true,
+      "keyword_recall_at_k": 0.6666666666666666,
+      "result_count": 5,
+      "error": null
+    },
+    {
+      "id": "retrieval_010",
+      "query": "HA-RRT 在实验中使用了哪些评价指标？",
+      "limit": 5,
+      "doc_hit_at_1": false,
+      "doc_hit_at_k": true,
+      "section_hit_at_k": true,
+      "keyword_recall_at_k": 0.6666666666666666,
+      "result_count": 5,
+      "error": null
+    },
+    {
+      "id": "retrieval_011",
+      "query": "HMA-RRT 的局限性或失败案例有哪些线索？",
+      "limit": 5,
+      "doc_hit_at_1": true,
+      "doc_hit_at_k": true,
+      "section_hit_at_k": true,
+      "keyword_recall_at_k": 0.0,
+      "result_count": 5,
+      "error": null
+    },
+    {
+      "id": "retrieval_012",
+      "query": "Hybrid-RRT 是否讨论了启发式与自适应策略的结合？",
+      "limit": 5,
+      "doc_hit_at_1": false,
+      "doc_hit_at_k": true,
+      "section_hit_at_k": true,
+      "keyword_recall_at_k": 0.6666666666666666,
+      "result_count": 5,
+      "error": null
+    },
+    {
+      "id": "retrieval_013",
+      "query": "对比 HA-RRT 与 HMA-RRT 在探索与收敛方面的差异。",
+      "limit": 5,
+      "doc_hit_at_1": true,
+      "doc_hit_at_k": true,
+      "section_hit_at_k": false,
+      "keyword_recall_at_k": 0.6666666666666666,
+      "result_count": 5,
+      "error": null
+    },
+    {
+      "id": "retrieval_014",
+      "query": "三篇论文在多障碍环境下的性能表现如何？",
+      "limit": 5,
+      "doc_hit_at_1": true,
+      "doc_hit_at_k": true,
+      "section_hit_at_k": false,
+      "keyword_recall_at_k": 1.0,
+      "result_count": 5,
+      "error": null
+    },
+    {
+      "id": "retrieval_015",
+      "query": "这些 RRT 改进方法在船舶路径规划中的共性问题是什么？",
+      "limit": 5,
+      "doc_hit_at_1": true,
+      "doc_hit_at_k": true,
+      "section_hit_at_k": true,
+      "keyword_recall_at_k": 1.0,
+      "result_count": 5,
+      "error": null
+    }
+  ]
+}

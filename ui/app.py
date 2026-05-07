@@ -1,4 +1,4 @@
-import os
+﻿import os
 import time
 from typing import Any, Dict
 from urllib.parse import urlparse, urlunparse
@@ -380,14 +380,14 @@ def render_input_toolbar(
     general_web_provider: str,
 ) -> None:
     st.caption("可选：选择分析模板或调整检索工具")
-    cols = st.columns([1.1, 1.0, 5.5, 1.2])
-    with cols[0]:
-        _render_analysis_panel_compact(resolved_base_url, backend_health_ok)
-    with cols[1]:
-        _render_tools_compact(openalex_enabled, general_web_enabled, general_web_provider, backend_health_ok)
-    with cols[2]:
-        st.empty()
-    with cols[3]:
+    left, right = st.columns([2.1, 7.9])
+    with left:
+        c1, c2 = st.columns(2)
+        with c1:
+            _render_analysis_panel_compact(resolved_base_url, backend_health_ok)
+        with c2:
+            _render_tools_compact(openalex_enabled, general_web_enabled, general_web_provider, backend_health_ok)
+    with right:
         if bool(st.session_state.get("is_streaming")):
             if st.button("■ 停止", type="secondary", use_container_width=True):
                 st.session_state.stop_requested = True
@@ -409,7 +409,10 @@ with st.sidebar:
 
     if st.button("检查服务状态"):
         now_ok, now_err = _probe_health(resolved_base_url)
-        st.success("服务运行正常") if now_ok else st.error(f"服务不可用：{now_err}")
+        if now_ok:
+            st.success("服务运行正常")
+        else:
+            st.error(f"服务不可用：{now_err}")
     if st.button("新建对话"):
         st.session_state.messages = []
         st.session_state.active_session_id = None

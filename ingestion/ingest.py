@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+from collections import Counter
 from datetime import datetime
 import json
 import logging
@@ -33,6 +34,7 @@ class DocumentIngestionPipeline:
         config: IngestionConfig,
         documents_folder: str = "documents",
         clean_before_ingest: bool = False,
+        reset_kb_before_ingest: bool = False,
         sql_schema_path: str = "sql/schema.sql",
         include_images: bool = True,
         include_tables: bool = True,
@@ -41,6 +43,7 @@ class DocumentIngestionPipeline:
         self.config = config
         self.documents_folder = documents_folder
         self.clean_before_ingest = clean_before_ingest
+        self.reset_kb_before_ingest = reset_kb_before_ingest
         self.sql_schema_path = sql_schema_path
 
         # 配置 PDF 提取
@@ -84,6 +87,11 @@ class DocumentIngestionPipeline:
 
     async def _clean_databases(self):
         """清理数据库表中的已有数据。"""
+        if os.getenv("ALLOW_DESTRUCTIVE_INGEST_CLEAN", "").strip().lower() != "true":
+            raise RuntimeError(
+                "--clean 会删除 sessions/messages/documents/chunks。"
+                "如确认要执行，请设置环境变量 ALLOW_DESTRUCTIVE_INGEST_CLEAN=true 后重试。"
+            )
         logger.warning("Cleaning existing data from databases...")
 
         async with db_pool.acquire() as conn:
@@ -94,6 +102,20 @@ class DocumentIngestionPipeline:
                 await conn.execute("DELETE FROM documents")
 
         logger.info("Cleaned PostgreSQL database")
+
+    async def _reset_knowledge_base(self):
+        if os.getenv("ALLOW_KB_RESET", "").strip().lower() != "true":
+            raise RuntimeError(
+                "--reset-kb 会删除 documents/chunks 并要求重新入库。"
+                "如确认要执行，请设置环境变量 ALLOW_KB_RESET=true 后重试。"
+            )
+
+        logger.warning("Resetting knowledge base: deleting chunks and documents only...")
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("DELETE FROM chunks")
+                await conn.execute("DELETE FROM documents")
+        logger.info("Knowledge base reset complete; sessions/messages were preserved.")
 
     async def _ingest_single_document(self, file_path: str) -> IngestionResult:
         """导入单个文档。"""
@@ -125,6 +147,17 @@ class DocumentIngestionPipeline:
             )
 
         logger.info(f"Total chunks created: {len(main_chunks)}")
+        method_counts = Counter(
+            str((chunk.metadata or {}).get("chunk_method") or "unknown")
+            for chunk in main_chunks
+        )
+        section_titles = {
+            str((chunk.metadata or {}).get("section_title") or "").strip()
+            for chunk in main_chunks
+            if str((chunk.metadata or {}).get("section_title") or "").strip()
+        }
+        logger.info("Chunk method distribution for %s: %s", document_title, dict(method_counts))
+        logger.info("Detected %s unique sections for %s", len(section_titles), document_title)
 
         embedded_chunks = await self.aembed_chunks(
             chunks=main_chunks,
@@ -155,8 +188,14 @@ class DocumentIngestionPipeline:
         if not self._initialized:
             await self.initialize()
 
+        if self.clean_before_ingest and self.reset_kb_before_ingest:
+            raise ValueError("Use either --clean or --reset-kb, not both.")
+
         if self.clean_before_ingest:
             await self._clean_databases()
+
+        if self.reset_kb_before_ingest:
+            await self._reset_knowledge_base()
 
         pdf_files = self._find_pdfs_in_directory(self.documents_folder)
 
@@ -313,6 +352,11 @@ async def main():
     parser = argparse.ArgumentParser(description="Document ingestion with table/image processing")
     parser.add_argument("--documents", "-d", default="documents", help="Documents folder path")
     parser.add_argument("--clean", "-c", action="store_true", help="Clean existing data before ingestion")
+    parser.add_argument(
+        "--reset-kb",
+        action="store_true",
+        help="Delete existing documents and chunks before ingestion, while preserving sessions and messages.",
+    )
     parser.add_argument("--chunk-size", type=int, default=850, help="Chunk size for splitting documents")
     parser.add_argument("--no-semantic", action="store_true", help="Disable semantic chunking")
     parser.add_argument("--chunk-overlap", type=int, default=150, help="Chunk overlap size")
@@ -354,6 +398,7 @@ async def main():
         config=config,
         documents_folder=args.documents,
         clean_before_ingest=args.clean,
+        reset_kb_before_ingest=args.reset_kb,
         sql_schema_path=args.sql_schema_path,
         include_images=include_images,
         include_tables=include_tables,

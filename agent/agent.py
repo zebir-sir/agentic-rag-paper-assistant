@@ -15,6 +15,7 @@ from .tool_payloads import (
     run_hybrid_search_payload,
     run_list_documents_payload,
     run_openalex_payload,
+    run_section_search_payload,
     run_vector_search_payload,
 )
 
@@ -35,6 +36,7 @@ async def search_knowledge_base(
     query: str,
     limit: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
+    """Search uploaded/local papers for evidence from the local knowledge base."""
     search_type = _resolve_default_search_type(ctx.deps)
     default_limit = int((ctx.deps.search_preferences or {}).get("default_limit", 10) or 10)
     effective_limit = max(1, min(int(limit or default_limit), 50))
@@ -68,6 +70,24 @@ async def hybrid_search(
 
 
 @rag_agent.tool
+async def section_search(
+    ctx: RunContext[AgentDependencies],
+    query: str,
+    section_query: str,
+    limit: int = 10,
+    document_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Search chunks within a specific section using section metadata."""
+    return await run_section_search_payload(
+        deps=ctx.deps,
+        query=query,
+        section_query=section_query,
+        limit=max(1, min(int(limit or 10), 50)),
+        document_id=document_id,
+    )
+
+
+@rag_agent.tool
 async def get_document(
     ctx: RunContext[AgentDependencies],
     document_id: str,
@@ -90,7 +110,7 @@ async def search_openalex_papers(
     query: str,
     limit: int = 5,
 ) -> List[Dict[str, Any]]:
-    """Search OpenAlex works when web search is enabled and return academic metadata."""
+    """Search OpenAlex for paper discovery and metadata (authors/year/DOI/venue/OA links)."""
     if not ctx.deps.use_web_search:
         return []
 

@@ -289,7 +289,6 @@ def stream_chat(
                 with sources_box.container():
                     render_sources(current_sources, base_url, "stream", add_openalex_source_to_kb)
             elif dtype == "error":
-                status_box.empty()
                 stream_error = str(data.get("content") or "流式请求失败")
                 response_box.error(stream_error)
                 break
@@ -297,10 +296,10 @@ def stream_chat(
                 break
     except Exception as e:
         stream_error = str(e)
-        status_box.empty()
         response_box.error(f"流式请求失败：{e}")
 
-    status_box.empty()
+    if full_response.strip():
+        status_box.empty()
     stop_box.empty()
     if full_response.strip():
         response_box.markdown(full_response)

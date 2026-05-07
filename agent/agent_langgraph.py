@@ -1,5 +1,8 @@
+import json
+import os
+import re
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypedDict
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
@@ -26,6 +29,24 @@ class LangGraphAnalysisState(TypedDict, total=False):
     warnings: List[str]
     metadata: Dict[str, Any]
     progress_callback: Optional[Callable[[str], Awaitable[None]]]
+    current_query: str
+    retrieval_attempt_count: int
+    retrieval_attempts: List[Dict[str, Any]]
+    rewritten_queries: List[str]
+    retrieval_sufficient: bool
+    retrieval_insufficient_reason: Optional[str]
+    retrieval_top_score: Optional[float]
+    max_retrieval_attempts: int
+    skip_rewrite: bool
+    suggested_rewrite_query: str
+    retrieval_evaluation: Dict[str, Any]
+    target_document_id: str
+    target_document_title: str
+    answer_scope: Dict[str, Any]
+    scope_policy: str
+    target_documents: List[Dict[str, Any]]
+    allow_supplemental: bool
+    scope_resolver_used: bool
 
 
 @dataclass
@@ -56,6 +77,26 @@ async def _emit_progress(state: LangGraphAnalysisState, message: str) -> None:
     await callback(message)
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 def _doc_to_dict(doc: Any) -> Dict[str, Any]:
     if hasattr(doc, "model_dump"):
         payload = doc.model_dump()
@@ -83,6 +124,191 @@ def _doc_to_dict(doc: Any) -> Dict[str, Any]:
     return payload
 
 
+_SCOPE_POLICIES = {"strict_target", "prefer_target", "broad_kb", "external_allowed"}
+
+
+def build_answer_scope_prompt(question: str, documents: List[Dict[str, Any]]) -> str:
+    doc_lines: List[str] = []
+    for d in documents[:20]:
+        doc_lines.append(
+            f"- id={d.get('id')} | title={d.get('title')} | source={d.get('source')}"
+        )
+    doc_block = "\n".join(doc_lines) if doc_lines else "- none"
+    return (
+        "You are an answer-scope resolver for a paper-reading assistant.\n"
+        "Infer which document scope the user expects, from the question and document list.\n"
+        "Do not answer the question. Do not use fixed keyword tricks.\n"
+        "Choose one scope_policy from: strict_target, prefer_target, broad_kb, external_allowed.\n"
+        "If user intent points to one specific uploaded paper/file/title, choose strict_target or prefer_target.\n"
+        "If user asks for multi-paper comparison or broad topic synthesis, choose broad_kb.\n"
+        "If user asks for latest papers/related work/outside sources, choose external_allowed.\n"
+        "If uncertain, prefer prefer_target or broad_kb (avoid over-strict).\n"
+        "Return strict JSON only:\n"
+        '{"scope_policy":"strict_target|prefer_target|broad_kb|external_allowed",'
+        '"target_documents":[{"document_id":"...","title":"...","confidence":0.0,"match_reason":"..."}],'
+        '"allow_supplemental":true,"scope_reason":"...","answer_instruction":"..."}\n\n'
+        f"User question:\n{question}\n\n"
+        f"Documents:\n{doc_block}\n"
+    )
+
+
+def parse_answer_scope(raw_text: str, documents: List[Dict[str, Any]]) -> Dict[str, Any]:
+    fallback = {
+        "scope_policy": "broad_kb",
+        "target_documents": [],
+        "allow_supplemental": True,
+        "scope_resolver_used": False,
+        "scope_reason": "",
+        "answer_instruction": "",
+    }
+    text = (raw_text or "").strip()
+    if not text:
+        return fallback
+    match = re.search(r"\{[\s\S]*\}", text)
+    payload = match.group(0) if match else text
+    try:
+        data = json.loads(payload)
+    except Exception:
+        return fallback
+    if not isinstance(data, dict):
+        return fallback
+
+    policy = str(data.get("scope_policy") or "broad_kb").strip()
+    if policy not in _SCOPE_POLICIES:
+        policy = "broad_kb"
+
+    docs_by_id = {str(d.get("id")): d for d in documents if d.get("id") is not None}
+    parsed_targets: List[Dict[str, Any]] = []
+    raw_targets = data.get("target_documents")
+    if isinstance(raw_targets, list):
+        for item in raw_targets:
+            if not isinstance(item, dict):
+                continue
+            did = str(item.get("document_id") or "").strip()
+            if not did or did not in docs_by_id:
+                continue
+            conf_raw = item.get("confidence", 0.0)
+            try:
+                conf = float(conf_raw)
+            except Exception:
+                conf = 0.0
+            conf = max(0.0, min(1.0, conf))
+            parsed_targets.append(
+                {
+                    "document_id": did,
+                    "title": str(item.get("title") or docs_by_id[did].get("title") or "").strip(),
+                    "confidence": conf,
+                    "match_reason": str(item.get("match_reason") or "").strip(),
+                }
+            )
+
+    allow_supp = data.get("allow_supplemental")
+    if isinstance(allow_supp, bool):
+        allow_supplemental = allow_supp
+    elif isinstance(allow_supp, str):
+        value = allow_supp.strip().lower()
+        if value in {"true", "1", "yes"}:
+            allow_supplemental = True
+        elif value in {"false", "0", "no"}:
+            allow_supplemental = False
+        else:
+            allow_supplemental = True
+    else:
+        allow_supplemental = True
+    if policy == "strict_target":
+        allow_supplemental = False
+
+    return {
+        "scope_policy": policy,
+        "target_documents": parsed_targets,
+        "allow_supplemental": allow_supplemental,
+        "scope_resolver_used": True,
+        "scope_reason": str(data.get("scope_reason") or "").strip(),
+        "answer_instruction": str(data.get("answer_instruction") or "").strip(),
+    }
+
+
+def _extract_explicit_target_documents(question: str, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    text = str(question or "")
+    ids = re.findall(
+        r"(?:目标文档 ID|文档 ID|document_id)[:：]\s*([A-Za-z0-9_-]{3,80})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not ids:
+        return []
+
+    docs_by_id = {
+        str(d.get("id")): d
+        for d in documents
+        if d.get("id") is not None
+    }
+
+    targets: List[Dict[str, Any]] = []
+    seen = set()
+    for did in ids:
+        did = str(did).strip()
+        if not did or did in seen:
+            continue
+        seen.add(did)
+        doc = docs_by_id.get(did, {})
+        targets.append(
+            {
+                "document_id": did,
+                "title": str(doc.get("title") or "").strip(),
+                "confidence": 1.0,
+                "match_reason": "explicit document_id in user prompt",
+            }
+        )
+    return targets
+
+
+async def resolve_answer_scope_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState:
+    next_state = dict(state)
+    question = str(next_state.get("question") or "").strip()
+    documents = list(next_state.get("documents") or [])
+    fallback = parse_answer_scope("", documents)
+    explicit_targets = _extract_explicit_target_documents(question, documents)
+    if explicit_targets:
+        parsed = {
+            "scope_policy": "strict_target",
+            "target_documents": explicit_targets,
+            "allow_supplemental": False,
+            "scope_resolver_used": True,
+            "scope_reason": "User prompt contains explicit target document ID.",
+            "answer_instruction": "Answer using the explicitly selected target document(s).",
+        }
+    else:
+        try:
+            model = get_langchain_chat_model()
+            prompt = build_answer_scope_prompt(question, documents)
+            response = await model.ainvoke(
+                [
+                    {"role": "system", "content": "Return strict JSON only."},
+                    {"role": "user", "content": prompt},
+                ]
+            )
+            parsed = parse_answer_scope(_extract_response_text(response), documents)
+        except Exception as exc:
+            _append_warning(next_state, f"answer scope resolver failed: {exc}")
+            parsed = fallback
+
+    next_state["answer_scope"] = parsed
+    next_state["scope_policy"] = str(parsed.get("scope_policy") or "broad_kb")
+    next_state["target_documents"] = list(parsed.get("target_documents") or [])
+    next_state["allow_supplemental"] = bool(parsed.get("allow_supplemental", True))
+    next_state["scope_resolver_used"] = bool(parsed.get("scope_resolver_used", False))
+
+    metadata = dict(next_state.get("metadata") or {})
+    metadata["scope_policy"] = next_state["scope_policy"]
+    metadata["target_documents"] = next_state["target_documents"]
+    metadata["allow_supplemental"] = next_state["allow_supplemental"]
+    metadata["scope_resolver_used"] = next_state["scope_resolver_used"]
+    metadata["scope_reason"] = str(parsed.get("scope_reason") or "")
+    next_state["metadata"] = metadata
+    return next_state
+
+
 async def inspect_documents_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState:
     next_state = dict(state)
     await _emit_progress(next_state, "正在检查知识库文档...")
@@ -103,37 +329,651 @@ def _find_tool_by_name(tools: List[Any], name: str) -> Optional[Any]:
     return None
 
 
+def _dedupe_key(hit: Dict[str, Any]) -> Tuple[str, str, str]:
+    chunk_id = str(hit.get("chunk_id") or "").strip()
+    document_id = str(hit.get("document_id") or "").strip()
+    content_prefix = str(hit.get("content") or "").strip()[:120]
+    return chunk_id, document_id, content_prefix
+
+
+def dedupe_retrieval_hits(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen = set()
+    deduped: List[Dict[str, Any]] = []
+    for hit in hits:
+        key = _dedupe_key(hit)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(hit)
+    return deduped
+
+
+def _normalize_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def _extract_question_candidates(question: str) -> List[str]:
+    q = str(question or "").strip()
+    candidates: List[str] = []
+    for m in re.findall(r"([A-Za-z0-9._\-]+\.(?:pdf|docx?|txt))", q, flags=re.IGNORECASE):
+        candidates.append(m.strip())
+    for m in re.findall(r"[\"'“”‘’《》「」『』](.{3,120}?)[\"'“”‘’《》「」『』]", q):
+        s = m.strip()
+        if s:
+            candidates.append(s)
+    return candidates
+
+
+def _match_target_document(question: str, documents: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    q_norm = _normalize_text(question)
+    if not q_norm or not documents:
+        return None
+
+    candidate_terms = _extract_question_candidates(question)
+    best_doc = None
+    best_score = 0
+    for doc in documents:
+        title = str(doc.get("title") or "")
+        source = str(doc.get("source") or "")
+        did = str(doc.get("id") or "")
+        if not did:
+            continue
+        title_norm = _normalize_text(title)
+        source_norm = _normalize_text(source)
+        score = 0
+        if title_norm and title_norm in q_norm:
+            score = max(score, 4)
+        if source_norm and source_norm in q_norm:
+            score = max(score, 4)
+        source_base = _normalize_text(source.split("/")[-1].split("\\")[-1])
+        if source_base and source_base in q_norm:
+            score = max(score, 5)
+        title_no_ext = re.sub(r"\.(pdf|docx?|txt)$", "", title_norm).strip()
+        if title_no_ext and len(title_no_ext) >= 4 and title_no_ext in q_norm:
+            score = max(score, 3)
+        for term in candidate_terms:
+            t = _normalize_text(term)
+            if not t:
+                continue
+            if t in title_norm or t in source_norm or t in source_base:
+                score = max(score, 5)
+        if score > best_score:
+            best_score = score
+            best_doc = doc
+    if best_doc is None or best_score <= 0:
+        return None
+    return best_doc
+
+
+def _top_score_of(hits: List[Dict[str, Any]]) -> Optional[float]:
+    scores = [float(h["score"]) for h in hits if isinstance(h.get("score"), (int, float))]
+    return max(scores) if scores else None
+
+
+def _prioritize_target_document_hits(
+    hits: List[Dict[str, Any]],
+    target_document_id: str,
+    min_results: int,
+    strong_single_score: float,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    if not target_document_id:
+        return hits, False
+
+    target_hits: List[Dict[str, Any]] = []
+    other_hits: List[Dict[str, Any]] = []
+    for hit in hits:
+        if str(hit.get("document_id") or "") == target_document_id:
+            target_hits.append(hit)
+        else:
+            other_hits.append(hit)
+
+    for hit in target_hits:
+        meta = dict(hit.get("metadata") or {})
+        meta["reference_role"] = "primary_target"
+        hit["metadata"] = meta
+    for hit in other_hits:
+        meta = dict(hit.get("metadata") or {})
+        meta["reference_role"] = "supplemental"
+        hit["metadata"] = meta
+
+    target_top = _top_score_of(target_hits)
+    target_enough = bool(
+        target_hits
+        and (len(target_hits) >= min_results or (target_top is not None and target_top >= strong_single_score))
+    )
+    if target_enough:
+        return target_hits, False
+    return target_hits + other_hits, bool(other_hits)
+
+
+def _prioritize_sources_by_target(
+    sources: List[EvidenceSource],
+    target_document_id: str,
+) -> List[EvidenceSource]:
+    if not target_document_id:
+        return list(sources or [])
+    matched = [s for s in (sources or []) if str(getattr(s, "document_id", "") or "") == target_document_id]
+    others = [s for s in (sources or []) if str(getattr(s, "document_id", "") or "") != target_document_id]
+    for s in matched:
+        s.metadata = {"reference_role": "primary_target", **(s.metadata or {})}
+    for s in others:
+        s.metadata = {"reference_role": "supplemental", **(s.metadata or {})}
+    return matched + others
+
+
+def _extract_target_ids(target_documents: List[Dict[str, Any]]) -> List[str]:
+    return [str(d.get("document_id") or "").strip() for d in (target_documents or []) if str(d.get("document_id") or "").strip()]
+
+
+def _apply_scope_policy_to_hits(
+    hits: List[Dict[str, Any]],
+    scope_policy: str,
+    target_ids: List[str],
+    allow_supplemental: bool,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    if not hits:
+        return [], False
+    if scope_policy not in {"strict_target", "prefer_target"} or not target_ids:
+        return hits, False
+
+    target_set = set(target_ids)
+    target_hits: List[Dict[str, Any]] = []
+    other_hits: List[Dict[str, Any]] = []
+    for h in hits:
+        if str(h.get("document_id") or "") in target_set:
+            target_hits.append(h)
+        else:
+            other_hits.append(h)
+
+    for h in target_hits:
+        m = dict(h.get("metadata") or {})
+        m["reference_role"] = "primary_target"
+        h["metadata"] = m
+    for h in other_hits:
+        m = dict(h.get("metadata") or {})
+        m["reference_role"] = "supplemental"
+        h["metadata"] = m
+
+    if scope_policy == "strict_target":
+        return target_hits, False
+
+    target_top = _top_score_of(target_hits)
+    target_enough = bool(
+        target_hits and (len(target_hits) >= _env_int("LANGGRAPH_TARGET_DOC_MIN_RESULTS", 2) or (target_top is not None and target_top >= _env_float("LANGGRAPH_TARGET_DOC_STRONG_SINGLE_SCORE", 0.55)))
+    )
+    if target_enough or not allow_supplemental:
+        return target_hits, False
+    return target_hits + other_hits, bool(other_hits)
+
+
+def _apply_scope_policy_to_sources(
+    sources: List[EvidenceSource],
+    scope_policy: str,
+    target_ids: List[str],
+    allow_supplemental: bool,
+    supplemental_used: bool,
+) -> List[EvidenceSource]:
+    if scope_policy not in {"strict_target", "prefer_target"} or not target_ids:
+        return list(sources or [])
+    target_set = set(target_ids)
+    matched = [s for s in (sources or []) if str(getattr(s, "document_id", "") or "") in target_set]
+    others = [s for s in (sources or []) if str(getattr(s, "document_id", "") or "") not in target_set]
+    for s in matched:
+        s.metadata = {"reference_role": "primary_target", **(s.metadata or {})}
+    for s in others:
+        s.metadata = {"reference_role": "supplemental", **(s.metadata or {})}
+    if scope_policy == "strict_target":
+        return matched
+    if supplemental_used and allow_supplemental:
+        return matched + others
+    return matched
+
+
+def _extract_top_score(results: List[Dict[str, Any]]) -> Optional[float]:
+    scores: List[float] = []
+    for hit in results:
+        score = hit.get("score")
+        if isinstance(score, (int, float)):
+            scores.append(float(score))
+    if not scores:
+        return None
+    return max(scores)
+
+
+def build_retrieval_evaluation_prompt(
+    question: str,
+    results: List[Dict[str, Any]],
+    documents: List[Dict[str, Any]],
+    attempts: List[Dict[str, Any]],
+) -> str:
+    doc_summary = _summarize_documents(documents)
+    attempt_summary = _build_retrieval_attempts_summary(attempts, [])
+    hit_lines: List[str] = []
+    for idx, hit in enumerate(results[:8], start=1):
+        title = str(hit.get("document_title") or "Untitled").strip()
+        score = hit.get("score")
+        snippet = str(hit.get("content") or "").strip().replace("\n", " ")
+        snippet = snippet[:320] + ("..." if len(snippet) > 320 else "")
+        hit_lines.append(f"{idx}. document_title={title} | score={score} | snippet={snippet}")
+    hit_block = "\n".join(hit_lines) if hit_lines else "None"
+    return (
+        "You are a retrieval coverage checker.\n"
+        "Given the user question and retrieved snippets, decide whether another retrieval attempt is likely to add useful missing evidence.\n"
+        "Do not answer the user question.\n"
+        "If the snippets provide enough material for a useful answer, set answerable=true.\n"
+        "For synthesis, comparison, pros/cons, method analysis, and multi-paper questions, snippets do not need to contain a complete ready-made answer.\n"
+        "It is enough if they provide useful evidence that can be synthesized.\n"
+        "Use missing_aspects only for important missing evidence.\n"
+        "Use needs_retry=true only when another focused local retrieval is likely to improve the answer.\n"
+        "If answerable=false, missing_aspects should extract concrete entities/scenarios/terms/constraints from the user question whenever possible.\n"
+        "If answerable=false, provide suggested_query for the next local knowledge-base retrieval and preserve concrete keywords from the user question.\n"
+        "Do not invent paper-specific facts that are not supported by snippets.\n"
+        "Prefer compact keyword-style query, e.g., 'Hybrid-RRT 火星通信延迟 低重力 外太空部署 失败案例' or English equivalent.\n"
+        "Return strict JSON only with schema:\n"
+        '{"answerable": bool, "confidence": float, "needs_retry": bool, "reason": str, '
+        '"missing_aspects": [str], "suggested_query": str, "supporting_hit_indices": [int]}\n\n'
+        f"User question:\n{question}\n\n"
+        f"Document summary:\n{doc_summary}\n\n"
+        f"Retrieval attempt summary:\n{attempt_summary}\n\n"
+        f"Retrieved snippets:\n{hit_block}\n"
+    )
+
+
+def parse_retrieval_evaluation(raw_text: str) -> Optional[Dict[str, Any]]:
+    text = (raw_text or "").strip()
+    if not text:
+        return None
+    match = re.search(r"\{[\s\S]*\}", text)
+    payload = match.group(0) if match else text
+    try:
+        data = json.loads(payload)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    def _to_bool(v: Any, default: bool = False) -> bool:
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in {"true", "1", "yes"}:
+                return True
+            if s in {"false", "0", "no"}:
+                return False
+        return default
+
+    confidence_raw = data.get("confidence", 0.0)
+    try:
+        confidence = float(confidence_raw)
+    except Exception:
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+
+    missing_aspects_raw = data.get("missing_aspects", [])
+    missing_aspects: List[str] = []
+    if isinstance(missing_aspects_raw, list):
+        for item in missing_aspects_raw:
+            if isinstance(item, str):
+                v = item.strip()
+                if v:
+                    missing_aspects.append(v)
+
+    indices_raw = data.get("supporting_hit_indices", [])
+    supporting_hit_indices: List[int] = []
+    if isinstance(indices_raw, list):
+        for item in indices_raw:
+            try:
+                supporting_hit_indices.append(int(item))
+            except Exception:
+                continue
+
+    return {
+        "answerable": _to_bool(data.get("answerable"), False),
+        "confidence": confidence,
+        "needs_retry": _to_bool(data.get("needs_retry"), False),
+        "reason": str(data.get("reason") or "").strip(),
+        "missing_aspects": missing_aspects,
+        "suggested_query": str(data.get("suggested_query") or "").strip(),
+        "supporting_hit_indices": supporting_hit_indices,
+    }
+
+
+def _is_generic_suggested_query(text: str) -> bool:
+    q = (text or "").strip().lower()
+    if not q:
+        return True
+    generic_phrases = [
+        "specific content",
+        "details from",
+        "related to the user's question",
+        "related to the user question",
+        "direct answer",
+        "user's question",
+        "the paper",
+    ]
+    return any(p in q for p in generic_phrases)
+
+
+async def evaluate_retrieval_with_llm(state: LangGraphAnalysisState) -> Optional[Dict[str, Any]]:
+    results = list(state.get("retrieval_results") or [])
+    if not results:
+        return None
+    question = str(state.get("question") or "").strip()
+    documents = list(state.get("documents") or [])
+    attempts = list(state.get("retrieval_attempts") or [])
+    prompt = build_retrieval_evaluation_prompt(
+        question=question,
+        results=results,
+        documents=documents,
+        attempts=attempts,
+    )
+    try:
+        model = get_langchain_chat_model()
+        response = await model.ainvoke(
+            [
+                {"role": "system", "content": "Return strict JSON only."},
+                {"role": "user", "content": prompt},
+            ]
+        )
+        parsed = parse_retrieval_evaluation(_extract_response_text(response))
+        if parsed is None:
+            _append_warning(state, "retrieval evaluator parse failed; fallback to rule grading.")
+        return parsed
+    except Exception as exc:
+        _append_warning(state, f"retrieval evaluator failed: {exc}")
+        return None
+
+
+def grade_retrieval_quality(
+    results: List[Dict[str, Any]],
+    min_results: int,
+    min_top_score: float,
+    single_hit_strong_score: float,
+) -> Tuple[bool, str, Optional[float]]:
+    if not results:
+        return False, "no_results", None
+
+    result_count = len(results)
+    top_score = _extract_top_score(results)
+    if top_score is not None:
+        if result_count == 1 and top_score >= single_hit_strong_score:
+            return True, "single_strong_hit", top_score
+        if top_score < min_top_score:
+            return False, f"low_top_score<{min_top_score}", top_score
+        if result_count < min_results and top_score < single_hit_strong_score:
+            return False, f"insufficient_results<{min_results}", top_score
+        return True, "sufficient_scored_hits", top_score
+
+    if result_count >= min_results:
+        return True, "sufficient_unscored_hits", None
+    return False, f"insufficient_unscored_results<{min_results}", None
+
+
 async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState:
     next_state = dict(state)
-    await _emit_progress(next_state, "正在检索本地知识库...")
     deps = next_state.get("deps")
     question = str(next_state.get("question") or "").strip()
-    if not deps or not question:
-        next_state["retrieval_results"] = []
-        if not question:
-            _append_warning(next_state, "Empty question; skip retrieval.")
-        await _emit_progress(next_state, "已找到 0 条相关片段")
+    attempt_count = int(next_state.get("retrieval_attempt_count") or 0) + 1
+    next_state["retrieval_attempt_count"] = attempt_count
+
+    if attempt_count <= 1:
+        query = question
+    else:
+        query = str(next_state.get("current_query") or question).strip()
+    next_state["current_query"] = query
+
+    limit = 3 if attempt_count == 1 else 5
+    await _emit_progress(next_state, f"正在进行第 {attempt_count} 轮本地知识库检索...")
+
+    existing_results = list(next_state.get("retrieval_results") or [])
+    attempts = list(next_state.get("retrieval_attempts") or [])
+
+    if not deps or not query:
+        if not query:
+            _append_warning(next_state, "Empty query; skip retrieval.")
+        attempt = {
+            "attempt": attempt_count,
+            "query": query,
+            "limit": limit,
+            "result_count": 0,
+            "top_score": None,
+        }
+        attempts.append(attempt)
+        next_state["retrieval_attempts"] = attempts
+        next_state["retrieval_results"] = existing_results
         return next_state
 
     try:
         tools = build_langchain_tools(deps)
         search_tool = _find_tool_by_name(tools, "search_knowledge_base")
         if search_tool is None:
-            next_state["retrieval_results"] = []
             _append_warning(next_state, "search_knowledge_base tool not found.")
-            return next_state
+            round_results: List[Dict[str, Any]] = []
+            attempt_error: Optional[str] = "search_knowledge_base tool not found"
+        else:
+            round_results = list(await search_tool.ainvoke({"query": query, "limit": limit}) or [])
+            _append_tool_call(next_state, "search_knowledge_base", {"query": query, "limit": limit})
+            attempt_error = None
 
-        results = await search_tool.ainvoke({"query": question, "limit": 3})
-        next_state["retrieval_results"] = list(results or [])
-        next_state["sources"] = list(deps.retrieved_sources)
-        _append_tool_call(next_state, "search_knowledge_base", {"query": question, "limit": 3})
-        await _emit_progress(next_state, f"已找到 {len(next_state['retrieval_results'])} 条相关片段")
+        scope_policy = str(next_state.get("scope_policy") or "broad_kb")
+        target_ids = _extract_target_ids(list(next_state.get("target_documents") or []))
+        allow_supplemental = bool(next_state.get("allow_supplemental", True))
+        prioritized_round_results, used_supplemental = _apply_scope_policy_to_hits(
+            round_results,
+            scope_policy=scope_policy,
+            target_ids=target_ids,
+            allow_supplemental=allow_supplemental,
+        )
+        merged = dedupe_retrieval_hits(existing_results + prioritized_round_results)
+        top_score = _extract_top_score(prioritized_round_results)
+        attempt = {
+            "attempt": attempt_count,
+            "query": query,
+            "limit": limit,
+            "result_count": len(prioritized_round_results),
+            "top_score": top_score,
+        }
+        if target_ids:
+            attempt["target_document_ids"] = target_ids
+            attempt["supplemental_used"] = used_supplemental
+        if attempt_error:
+            attempt["error"] = attempt_error
+        attempts.append(attempt)
+        next_state["retrieval_attempts"] = attempts
+        next_state["retrieval_results"] = merged
+        next_state["sources"] = _apply_scope_policy_to_sources(
+            list(getattr(deps, "retrieved_sources", []) or []),
+            scope_policy=scope_policy,
+            target_ids=target_ids,
+            allow_supplemental=allow_supplemental,
+            supplemental_used=used_supplemental,
+        )
+        await _emit_progress(
+            next_state,
+            f"第 {attempt_count} 轮检索得到 {len(round_results)} 条，累计 {len(merged)} 条。",
+        )
     except Exception as exc:
-        next_state["retrieval_results"] = []
-        next_state["sources"] = list(getattr(deps, "retrieved_sources", []) or [])
         _append_warning(next_state, f"local retrieval failed: {exc}")
-        await _emit_progress(next_state, "已找到 0 条相关片段")
+        next_state["sources"] = list(getattr(deps, "retrieved_sources", []) or [])
+        attempts.append(
+            {
+                "attempt": attempt_count,
+                "query": query,
+                "limit": limit,
+                "result_count": 0,
+                "top_score": None,
+                "error": str(exc),
+            }
+        )
+        next_state["retrieval_attempts"] = attempts
+        next_state["retrieval_results"] = existing_results
     return next_state
+
+
+async def grade_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState:
+    next_state = dict(state)
+    await _emit_progress(next_state, "正在评估检索片段是否足以回答问题...")
+    results = list(next_state.get("retrieval_results") or [])
+
+    min_results = _env_int("LANGGRAPH_RETRIEVAL_MIN_RESULTS", 2)
+    min_top_score = _env_float("LANGGRAPH_RETRIEVAL_MIN_TOP_SCORE", 0.25)
+    single_hit_strong_score = _env_float("LANGGRAPH_RETRIEVAL_SINGLE_HIT_STRONG_SCORE", 0.55)
+
+    rule_sufficient, rule_reason, top_score = grade_retrieval_quality(
+        results=results,
+        min_results=min_results,
+        min_top_score=min_top_score,
+        single_hit_strong_score=single_hit_strong_score,
+    )
+    eval_conf_threshold = _env_float("LANGGRAPH_RETRIEVAL_EVAL_CONFIDENCE_THRESHOLD", 0.6)
+    evaluator_used = False
+    evaluator = None
+    retrieval_retry_trigger = "rule"
+    suggested_rewrite_query = ""
+    attempts = int(next_state.get("retrieval_attempt_count") or 0)
+    max_attempts = int(next_state.get("max_retrieval_attempts") or _env_int("LANGGRAPH_MAX_RETRIEVAL_ATTEMPTS", 2))
+    scope_policy = str(next_state.get("scope_policy") or "broad_kb")
+    target_ids = set(_extract_target_ids(list(next_state.get("target_documents") or [])))
+
+    if results:
+        evaluator = await evaluate_retrieval_with_llm(next_state)
+        evaluator_used = evaluator is not None
+
+    if evaluator_used and evaluator is not None:
+        answerable = bool(evaluator.get("answerable"))
+        confidence = float(evaluator.get("confidence", 0.0))
+        needs_retry = bool(evaluator.get("needs_retry"))
+        has_target_hits = bool(
+            [
+                r
+                for r in results
+                if str((r or {}).get("document_id") or "").strip() in target_ids
+            ]
+        )
+        if not results:
+            sufficient = False
+            reason = "no_results"
+        elif scope_policy == "strict_target" and target_ids and not has_target_hits:
+            sufficient = False
+            reason = "strict_target_no_hits"
+        elif answerable:
+            sufficient = True
+            reason = str(evaluator.get("reason") or "")
+            if confidence < eval_conf_threshold:
+                reason = reason or "partial_evidence"
+        elif needs_retry and attempts < max_attempts:
+            sufficient = False
+            reason = str(evaluator.get("reason") or "") or "evaluator_retry_suggested"
+        elif scope_policy != "strict_target" and results:
+            sufficient = True
+            reason = str(evaluator.get("reason") or "") or "partial_evidence"
+        else:
+            sufficient = False
+            reason = str(evaluator.get("reason") or "") or "evaluator_insufficient"
+        next_state["retrieval_evaluation"] = evaluator
+        suggested_rewrite_query = str(evaluator.get("suggested_query") or "").strip()
+        if suggested_rewrite_query and not _is_generic_suggested_query(suggested_rewrite_query):
+            next_state["suggested_rewrite_query"] = suggested_rewrite_query
+        else:
+            suggested_rewrite_query = ""
+        retrieval_retry_trigger = "llm_evaluator_retry" if (not sufficient and bool(evaluator.get("needs_retry"))) else ("llm_evaluator" if not sufficient else "none")
+    else:
+        if not results:
+            sufficient = False
+            reason = "no_results"
+        elif scope_policy == "strict_target" and target_ids:
+            has_target_hits = bool(
+                [
+                    r
+                    for r in results
+                    if str((r or {}).get("document_id") or "").strip() in target_ids
+                ]
+            )
+            sufficient = bool(has_target_hits and rule_sufficient)
+            reason = rule_reason if sufficient else "strict_target_no_hits"
+        else:
+            sufficient = True
+            reason = rule_reason
+
+    next_state["retrieval_sufficient"] = sufficient
+    next_state["retrieval_insufficient_reason"] = None if sufficient else reason
+    next_state["retrieval_top_score"] = top_score
+
+    metadata = dict(next_state.get("metadata") or {})
+    latest_attempt = (list(next_state.get("retrieval_attempts") or []) or [None])[-1]
+    metadata["retrieval_sufficient"] = sufficient
+    metadata["retrieval_insufficient_reason"] = next_state.get("retrieval_insufficient_reason")
+    metadata["retrieval_top_score"] = top_score
+    metadata["retrieval_attempt_count"] = int(next_state.get("retrieval_attempt_count") or 0)
+    metadata["latest_retrieval_result_count"] = (
+        latest_attempt.get("result_count") if isinstance(latest_attempt, dict) else None
+    )
+    metadata["latest_retrieval_top_score"] = (
+        latest_attempt.get("top_score") if isinstance(latest_attempt, dict) else None
+    )
+    metadata["retrieval_evaluator_used"] = evaluator_used
+    metadata["retrieval_answerable"] = bool((evaluator or {}).get("answerable")) if evaluator else None
+    metadata["retrieval_confidence"] = (evaluator or {}).get("confidence") if evaluator else None
+    metadata["retrieval_needs_retry"] = bool((evaluator or {}).get("needs_retry")) if evaluator else None
+    metadata["retrieval_missing_aspects"] = list((evaluator or {}).get("missing_aspects") or []) if evaluator else []
+    metadata["retrieval_evaluator_reason"] = str((evaluator or {}).get("reason") or "") if evaluator else ""
+    metadata["retrieval_retry_trigger"] = retrieval_retry_trigger
+    metadata["suggested_rewrite_query"] = suggested_rewrite_query
+    next_state["metadata"] = metadata
+
+    if not sufficient:
+        await _emit_progress(next_state, "检索不足，正在改写查询...")
+    return next_state
+
+
+def _clean_fallback_query(question: str) -> str:
+    cleaned = question
+    for token in ["这篇论文", "该论文", "帮我", "请", "分析", "总结", "一下", "详细", "深度", "地", "进行"]:
+        cleaned = cleaned.replace(token, " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ，,。！？!?:：;；")
+    return cleaned
+
+
+def _parse_rewrite_queries(raw_text: str) -> List[str]:
+    text = (raw_text or "").strip()
+    if not text:
+        return []
+    match = re.search(r"\{[\s\S]*\}", text)
+    payload = match.group(0) if match else text
+    try:
+        data = json.loads(payload)
+    except Exception:
+        # Text fallback: accept a single concise query line only.
+        cleaned = text
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+        lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+        if len(lines) != 1:
+            return []
+        line = lines[0]
+        line = re.sub(r"^[-*•\d\.\)\s]+", "", line).strip()
+        line = re.sub(
+            r"^(?:query|queries|检索词|查询|改写查询)\s*[:：]\s*",
+            "",
+            line,
+            flags=re.IGNORECASE,
+        ).strip()
+        if not line or len(line) > 300:
+            return []
+        if re.search(r"(因为|所以|理由|解释|说明|建议|I suggest|because|therefore)", line, flags=re.IGNORECASE):
+            return []
+        return [line]
+    queries = data.get("queries") if isinstance(data, dict) else None
+    if not isinstance(queries, list):
+        return []
+    out: List[str] = []
+    for q in queries:
+        if isinstance(q, str):
+            v = q.strip()
+            if v:
+                out.append(v)
+    return out
 
 
 def _summarize_documents(documents: List[Dict[str, Any]]) -> str:
@@ -150,7 +990,7 @@ def _summarize_documents(documents: List[Dict[str, Any]]) -> str:
 
 def _summarize_retrieval_results(results: List[Dict[str, Any]]) -> str:
     if not results:
-        return "未检索到相关片段。"
+        return "当前未检索到可用片段。"
     lines: List[str] = []
     for idx, hit in enumerate(results[:3], start=1):
         title = str(hit.get("document_title") or "Untitled").strip()
@@ -180,49 +1020,177 @@ def _extract_response_text(response: Any) -> str:
     return str(content).strip()
 
 
+async def rewrite_query_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState:
+    next_state = dict(state)
+    question = str(next_state.get("question") or "").strip()
+    current_query = str(next_state.get("current_query") or question).strip()
+    reason = str(next_state.get("retrieval_insufficient_reason") or "insufficient")
+    documents = list(next_state.get("documents") or [])
+    results = list(next_state.get("retrieval_results") or [])
+    rewritten_queries = list(next_state.get("rewritten_queries") or [])
+    suggested_rewrite_query = str(next_state.get("suggested_rewrite_query") or "").strip()
+
+    history = {question, current_query, *rewritten_queries}
+    if suggested_rewrite_query and suggested_rewrite_query not in history:
+        rewritten_queries.append(suggested_rewrite_query)
+        next_state["rewritten_queries"] = rewritten_queries
+        next_state["current_query"] = suggested_rewrite_query
+        _append_tool_call(
+            next_state,
+            "rewrite_retrieval_query",
+            {"from": current_query, "to": suggested_rewrite_query, "reason": f"{reason}|suggested_by_evaluator"},
+        )
+        return next_state
+
+    prompt = (
+        "你是检索查询改写器。仅输出用于本地知识库检索的 query，不要回答问题，不要联网，不要编造事实。\n"
+        "不要编造论文标题、作者、年份、DOI；如果信息不在输入中，不要新增。\n"
+        "优先保留并重组用户问题中的论文标题、方法名、指标名、任务名等关键词。\n"
+        "请返回严格 JSON，格式为：{\"queries\": [\"query1\", \"query2\"]}。\n\n"
+        f"用户原始问题：{question}\n"
+        f"当前 query：{current_query}\n"
+        f"文档列表摘要：\n{_summarize_documents(documents)}\n\n"
+        f"已检索片段摘要：\n{_summarize_retrieval_results(results)}\n\n"
+        f"检索不足原因：{reason}\n"
+    )
+
+    candidate_queries: List[str] = []
+    try:
+        model = get_langchain_chat_model()
+        response = await model.ainvoke(
+            [
+                {"role": "system", "content": "你只输出 JSON，不输出额外解释。"},
+                {"role": "user", "content": prompt},
+            ]
+        )
+        candidate_queries = _parse_rewrite_queries(_extract_response_text(response))
+    except Exception as exc:
+        _append_warning(next_state, f"rewrite retrieval query failed: {exc}")
+
+    if not candidate_queries:
+        if current_query != question:
+            candidate_queries = [question]
+        else:
+            fallback = _clean_fallback_query(question)
+            if fallback:
+                candidate_queries = [fallback]
+
+    history = {question, current_query, *rewritten_queries}
+    selected: Optional[str] = None
+    for item in candidate_queries:
+        if item not in history:
+            selected = item
+            break
+
+    if not selected:
+        next_state["skip_rewrite"] = True
+        next_state["retrieval_sufficient"] = False
+        next_state["retrieval_insufficient_reason"] = "rewrite_failed_or_duplicate"
+        _append_tool_call(
+            next_state,
+            "rewrite_retrieval_query",
+            {"from": current_query, "to": current_query, "reason": "rewrite_failed_or_duplicate"},
+        )
+        return next_state
+
+    rewritten_queries.append(selected)
+    next_state["rewritten_queries"] = rewritten_queries
+    next_state["current_query"] = selected
+    _append_tool_call(next_state, "rewrite_retrieval_query", {"from": current_query, "to": selected, "reason": reason})
+    return next_state
+
+
+def route_after_grade(state: LangGraphAnalysisState) -> str:
+    if bool(state.get("retrieval_sufficient")):
+        return "generate_analysis"
+    if bool(state.get("skip_rewrite")):
+        return "generate_analysis"
+    attempts = int(state.get("retrieval_attempt_count") or 0)
+    max_attempts = int(state.get("max_retrieval_attempts") or _env_int("LANGGRAPH_MAX_RETRIEVAL_ATTEMPTS", 2))
+    if attempts < max_attempts:
+        return "rewrite_query"
+    return "generate_analysis"
+
+
+def _build_retrieval_attempts_summary(attempts: List[Dict[str, Any]], rewritten_queries: List[str]) -> str:
+    if not attempts:
+        return "无检索尝试记录。"
+    lines = []
+    for att in attempts:
+        lines.append(
+            f"- 第{att.get('attempt')}轮: query={att.get('query')!r}, result_count={att.get('result_count')}, top_score={att.get('top_score')}"
+        )
+    if rewritten_queries:
+        lines.append(f"- query rewrite: {rewritten_queries}")
+    else:
+        lines.append("- query rewrite: 无")
+    return "\n".join(lines)
+
+
+def _build_retrieval_evaluation_summary(evaluation: Optional[Dict[str, Any]]) -> str:
+    if not evaluation:
+        return "No retrieval-evaluation record."
+    return (
+        f"answerable={evaluation.get('answerable')}, "
+        f"confidence={evaluation.get('confidence')}, "
+        f"needs_retry={evaluation.get('needs_retry')}, "
+        f"reason={evaluation.get('reason')}, "
+        f"missing_aspects={evaluation.get('missing_aspects')}, "
+        f"supporting_hit_indices={evaluation.get('supporting_hit_indices')}"
+    )
+
+
 def _humanize_warning(warning: str) -> Optional[str]:
     if "No retrieval evidence found" in warning:
         return "当前没有检索到直接相关片段，以下内容更适合作为一般性分析参考。"
     if "strong evidence wording but no sources" in warning:
-        return "当前来源不足以支撑过强的论文式表述，回答已按保守方式理解。"
+        return "回答存在较强结论措辞，但未收集到可核对来源，请谨慎参考。"
     return None
 
 
 async def generate_analysis_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState:
     next_state = dict(state)
-    await _emit_progress(next_state, "正在整合证据并生成分析...")
+    await _emit_progress(next_state, "正在整合证据并生成最终分析...")
     question = str(next_state.get("question") or "").strip()
     context_prompt = str(next_state.get("context_prompt") or "").strip()
     documents = list(next_state.get("documents") or [])
     retrieval_results = list(next_state.get("retrieval_results") or [])
     warnings = list(next_state.get("warnings") or [])
+    retrieval_attempts = list(next_state.get("retrieval_attempts") or [])
+    rewritten_queries = list(next_state.get("rewritten_queries") or [])
+    retrieval_evaluation = next_state.get("retrieval_evaluation")
+    answer_scope = dict(next_state.get("answer_scope") or {})
+    scope_policy = str(next_state.get("scope_policy") or "broad_kb")
+    answer_instruction = str(answer_scope.get("answer_instruction") or "")
 
     context_block = ""
     if context_prompt:
-        context_block = (
-            "会话上下文（仅用于指代消解，不作为文档证据）：\n"
-            f"{context_prompt}\n\n"
-        )
+        context_block = f"会话上下文（仅用于指代消歧，不作为文档证据）：\n{context_prompt}\n\n"
 
     prompt = (
         f"{context_block}"
         f"用户问题：\n{question}\n\n"
         f"文档列表（最多5条）：\n{_summarize_documents(documents)}\n\n"
         f"检索结果（最多3条）：\n{_summarize_retrieval_results(retrieval_results)}\n\n"
+        f"检索尝试摘要：\n{_build_retrieval_attempts_summary(retrieval_attempts, rewritten_queries)}\n\n"
+        f"回答范围策略：{scope_policy}\n"
+        f"回答范围说明：{answer_instruction or 'N/A'}\n\n"
         f"当前告警：\n{chr(10).join(warnings) if warnings else '无'}\n\n"
-        "请用中文给出简洁、准确、较严谨的深度分析回答。"
-        "若某个具体问题缺少证据，只在对应部分简短说明不确定或文中未明确，并给出保守建议。"
-        "会话上下文只能用于理解指代关系，不能作为论文证据。"
-        "不要编造具体论文细节，不要输出完整思考过程。"
-        "回答结构清晰即可，可使用标题和分点，但不必强制固定模板。"
-        "不要在已有证据的部分反复说证据不足，也不要与已有证据矛盾。"
+        "请根据用户问题和检索片段自然组织中文回答。优先完成用户当前任务。"
+        "可以综合多个片段进行总结、比较和分析。"
+        "对片段明确支持的内容直接分析；对片段没有覆盖的具体点，可以自然说明边界。"
+        "不要编造论文细节，不要把推断说成论文原文结论。"
     )
+    if scope_policy == "strict_target":
+        prompt += (
+            "你必须只将 target_documents 作为论文证据。"
+            "若目标文档证据不足，直接说明不足。"
+            "不要用 supplemental 片段来替代目标论文结论。"
+        )
 
     system_text = (
         SYSTEM_PROMPT
-        + "\n\n你现在处于 LangGraph 深度分析工作流中。"
-        + "请基于已提供的文档列表和检索结果进行较严谨的分析。"
-        + "若某个具体点证据不足，只在对应部分简短说明；不要让严格证据风格污染整篇回答。"
+        + "\n\n你正在执行 LangGraph 深度分析流程。请根据用户问题和检索片段完成分析。"
     )
 
     try:
@@ -236,7 +1204,7 @@ async def generate_analysis_node(state: LangGraphAnalysisState) -> LangGraphAnal
         next_state["draft_answer"] = _extract_response_text(response)
     except Exception as exc:
         _append_warning(next_state, f"analysis generation failed: {exc}")
-        fallback = "当前分析生成失败。请稍后重试，或先使用普通问答模式。"
+        fallback = "当前分析生成阶段出现异常。我会基于已有检索片段继续完成回答。"
         if not retrieval_results:
             fallback += " 当前没有检索到直接相关片段。"
         next_state["draft_answer"] = fallback
@@ -281,6 +1249,23 @@ async def evidence_check_node(state: LangGraphAnalysisState) -> LangGraphAnalysi
 
 async def finalize_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState:
     next_state = dict(state)
+    retrieval_attempts_final = list(next_state.get("retrieval_attempts") or [])
+    latest_attempt = retrieval_attempts_final[-1] if retrieval_attempts_final else {}
+    retrieval_results = list(next_state.get("retrieval_results") or [])
+    rewritten_queries = list(next_state.get("rewritten_queries") or [])
+    target_documents = list(next_state.get("target_documents") or [])
+    scope_policy = str(next_state.get("scope_policy") or "")
+    allow_supplemental = bool(next_state.get("allow_supplemental", True))
+    target_document_ids = {
+        str(item.get("document_id") or item.get("id") or "").strip()
+        for item in target_documents
+        if isinstance(item, dict)
+    }
+    target_document_ids.discard("")
+    target_document_hit_count = sum(
+        1 for hit in retrieval_results if str((hit or {}).get("document_id") or "").strip() in target_document_ids
+    )
+    target_document_enough = target_document_hit_count > 0
     await _emit_progress(next_state, "正在整理最终回答...")
     deps = next_state.get("deps")
     warnings = list(next_state.get("warnings") or [])
@@ -295,27 +1280,70 @@ async def finalize_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState
             answer = answer + "\n\n说明：" + "；".join(notes)
 
     next_state["final_answer"] = answer
-    next_state["sources"] = list(getattr(deps, "retrieved_sources", []) or [])
+    scope_policy = scope_policy or "broad_kb"
+    target_ids = _extract_target_ids(target_documents)
+    supplemental_used = any(bool((a or {}).get("supplemental_used")) for a in retrieval_attempts_final)
+    next_state["sources"] = _apply_scope_policy_to_sources(
+        list(getattr(deps, "retrieved_sources", []) or []),
+        scope_policy=scope_policy,
+        target_ids=target_ids,
+        allow_supplemental=allow_supplemental,
+        supplemental_used=supplemental_used,
+    )
+
+    retrieval_attempt_count = int(next_state.get("retrieval_attempt_count") or len(retrieval_attempts_final))
+    top_score = next_state.get("retrieval_top_score")
+    if top_score is None:
+        top_score = _extract_top_score(retrieval_results)
 
     metadata = dict(next_state.get("metadata") or {})
     metadata["agent_backend"] = "langgraph"
     metadata["workflow"] = "deep_analysis"
     metadata["tool_count"] = len(list(next_state.get("tools_used") or []))
+    metadata["retrieval_attempt_count"] = retrieval_attempt_count
+    metadata["retrieval_retry_count"] = max(0, retrieval_attempt_count - 1)
+    metadata["rewritten_queries"] = rewritten_queries
+    metadata["retrieval_sufficient"] = bool(next_state.get("retrieval_sufficient"))
+    metadata["retrieval_insufficient_reason"] = next_state.get("retrieval_insufficient_reason")
+    metadata["retrieval_top_score"] = top_score
+    metadata["retrieval_result_count"] = len(retrieval_results)
+    metadata["latest_retrieval_result_count"] = latest_attempt.get("result_count")
+    metadata["latest_retrieval_top_score"] = latest_attempt.get("top_score")
+    metadata["retrieval_evaluation"] = next_state.get("retrieval_evaluation")
+    metadata["suggested_rewrite_query"] = next_state.get("suggested_rewrite_query")
+    metadata["scope_policy"] = scope_policy
+    metadata["target_documents"] = target_documents
+    metadata["allow_supplemental"] = allow_supplemental
+    metadata["scope_resolver_used"] = bool(next_state.get("scope_resolver_used", False))
+    metadata["scope_reason"] = str((next_state.get("answer_scope") or {}).get("scope_reason") or "")
+    metadata["supplemental_reference_used"] = supplemental_used
+    metadata["target_document_hit_count"] = target_document_hit_count
+    metadata["target_document_enough"] = target_document_enough
+    metadata["source_count"] = len(next_state["sources"])
     next_state["metadata"] = metadata
     return next_state
-
 
 def build_langgraph_workflow():
     graph = StateGraph(LangGraphAnalysisState)
     graph.add_node("inspect_documents", inspect_documents_node)
+    graph.add_node("resolve_answer_scope", resolve_answer_scope_node)
     graph.add_node("local_retrieval", local_retrieval_node)
+    graph.add_node("grade_retrieval", grade_retrieval_node)
+    graph.add_node("rewrite_query", rewrite_query_node)
     graph.add_node("generate_analysis", generate_analysis_node)
     graph.add_node("evidence_check", evidence_check_node)
     graph.add_node("finalize", finalize_node)
 
     graph.add_edge(START, "inspect_documents")
-    graph.add_edge("inspect_documents", "local_retrieval")
-    graph.add_edge("local_retrieval", "generate_analysis")
+    graph.add_edge("inspect_documents", "resolve_answer_scope")
+    graph.add_edge("resolve_answer_scope", "local_retrieval")
+    graph.add_edge("local_retrieval", "grade_retrieval")
+    graph.add_conditional_edges(
+        "grade_retrieval",
+        route_after_grade,
+        {"generate_analysis": "generate_analysis", "rewrite_query": "rewrite_query"},
+    )
+    graph.add_edge("rewrite_query", "local_retrieval")
     graph.add_edge("generate_analysis", "evidence_check")
     graph.add_edge("evidence_check", "finalize")
     graph.add_edge("finalize", END)
@@ -342,6 +1370,31 @@ async def run_langgraph_analysis(
         "warnings": [],
         "metadata": {},
         "progress_callback": progress_callback,
+        "current_query": question,
+        "retrieval_attempt_count": 0,
+        "retrieval_attempts": [],
+        "rewritten_queries": [],
+        "retrieval_sufficient": False,
+        "retrieval_insufficient_reason": None,
+        "retrieval_top_score": None,
+        "max_retrieval_attempts": max(1, _env_int("LANGGRAPH_MAX_RETRIEVAL_ATTEMPTS", 2)),
+        "skip_rewrite": False,
+        "suggested_rewrite_query": "",
+        "retrieval_evaluation": {},
+        "target_document_id": "",
+        "target_document_title": "",
+        "answer_scope": {
+            "scope_policy": "broad_kb",
+            "target_documents": [],
+            "allow_supplemental": True,
+            "scope_resolver_used": False,
+            "scope_reason": "",
+            "answer_instruction": "",
+        },
+        "scope_policy": "broad_kb",
+        "target_documents": [],
+        "allow_supplemental": True,
+        "scope_resolver_used": False,
     }
 
     if progress_callback is not None:
@@ -350,7 +1403,10 @@ async def run_langgraph_analysis(
     final_state = await graph.ainvoke(initial_state)
     message = str(final_state.get("final_answer") or final_state.get("draft_answer") or "").strip()
     tools_used = list(final_state.get("tools_used") or [])
-    sources = list(final_state.get("sources") or list(deps.retrieved_sources))
+    if "sources" in final_state:
+        sources = list(final_state.get("sources") or [])
+    else:
+        sources = list(deps.retrieved_sources)
     metadata = dict(final_state.get("metadata") or {})
 
     return LangGraphAnalysisResult(

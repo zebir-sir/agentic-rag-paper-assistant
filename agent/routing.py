@@ -75,23 +75,24 @@ def _build_tool_choice_instruction(
 ) -> str:
     lines: List[str] = []
     if is_general_question:
-        lines.append(
-            "这是通用技术解释问题。可以直接回答；如果你对定义、区别或细节不确定，或者用户要求来源/联网，请调用 search_web 查证。不要使用本地知识库，除非用户明确问已上传论文。"
-        )
+        lines.append("这是通用技术解释问题。可直接回答；如需联网来源或事实查证，优先考虑 search_web。")
     if may_need_web:
-        lines.append(
-            "用户可能需要外部网页来源。若需要联网查证，请使用 search_web；若是在找论文、related work 或论文元数据，则使用 search_openalex_papers。"
-        )
+        lines.append("用户可能需要外部来源。若是文献发现/论文元数据，优先考虑 search_openalex_papers；若是开放网页信息，使用 search_web。")
     if has_local_evidence:
-        lines.append(
-            "本轮有本地知识库参考片段，回答论文相关问题时优先参考，但不要机械套模板。"
-        )
+        lines.append("本轮已有本地知识库证据，回答已上传论文相关问题时优先参考本地证据。")
     if not lines:
-        lines.append(
-            "请先判断用户是在问本地论文、学术论文检索、通用网页资料，还是通用知识解释，再决定是否调用工具。"
-        )
-    return "\n".join(lines)
+        lines.append("请先判断问题属于本地论文问答、学术文献发现、网页信息查询或通用解释，再决定工具。")
 
+    lines.append(
+        "Source selection policy:\n"
+        "- Use local knowledge base when the user asks about uploaded papers, selected documents, paper summaries, methods, experiments, limitations, or evidence from the local corpus.\n"
+        "- Use section_search when the user asks for a specific section such as Abstract, Method, Experiments, Results, Conclusion, References, or asks to only inspect a section.\n"
+        "- Use OpenAlex when the user asks to discover papers outside the local corpus, related work, literature search, authors, publication years, DOI, venue, citation metadata, open access links, or academic paper recommendations.\n"
+        "- Use general web search when the user asks about open-web information, recent information, technical explanations, non-paper web sources, daily/open-domain questions, or asks for web sources.\n"
+        "- If a source/tool is unavailable or disabled, explicitly say so and then fall back to available sources.\n"
+        "- Do not present local References chunks as if they were fresh OpenAlex or web search results. If using references extracted from local papers, label them as 'from local paper references'."
+    )
+    return "\n".join(lines)
 
 def is_degenerate_answer(text: str) -> bool:
     value = str(text or "")
@@ -248,8 +249,8 @@ async def _run_local_kb_preflight_if_needed(message: str, deps: AgentDependencie
 
         lines = [
             "[本地知识库预检索结果]",
-            "以下片段来自本地知识库。回答论文相关问题时优先参考这些片段，不要把它们说成联网资料。",
-            "若片段不足以支撑结论，请明确说明“当前检索片段不足”。",
+            "以下片段来自本地知识库。回答论文相关问题时可优先参考这些片段，不要把它们说成联网资料。",
+            "可综合这些片段回答用户问题；片段未覆盖的具体维度，可在对应结论处说明边界。",
         ]
         kept = []
         for hit in merged[:10]:
@@ -290,12 +291,13 @@ async def _run_local_kb_preflight_if_needed(message: str, deps: AgentDependencie
                     for hit in final_hits
                 )
                 if not found:
-                    lines.append(f"- 未在本地预检索结果中命中 `{query}`。")
+                    lines.append(f"- 本地预检索结果中未命中 `{query}`。")
 
         if timeout_happened:
             lines.append("- 部分本地预检索请求超时，结果可能不完整。")
 
         return "\n\n".join(lines)
+
 
     try:
         return await asyncio.wait_for(_inner(), timeout=LOCAL_PREFLIGHT_TIMEOUT_SECONDS)
@@ -326,34 +328,29 @@ def _dedupe_sources(sources: List[EvidenceSource]) -> List[EvidenceSource]:
 
 
 def _build_format_instruction(has_local_evidence: bool, is_general_question: bool) -> str:
-    base = """请使用清晰的中文回答。
-- 优先使用“小标题 + bullet list”的格式。
-- 严禁使用 Markdown 表格。
-- 对比类问题也不要使用 `|` 表格语法。
-- 不要输出任何包含 `| HA-RRT | HMA-RRT`、`| HA-RRT | HMA-RRT*` 的表格。
-- 标题必须写成 `## 1. 标题`，`##` 后必须有空格。
-- 不要输出 `##1.`、`##2.`、`###1.` 这种无空格标题。
-- 每个 bullet 必须单独成行。
-- 如果比较 HA-RRT 和 HMA-RRT，固定使用：
-  简短结论
-  ## 1. 研究对象不同
-  ## 2. 改进策略不同
-  ## 3. 约束建模不同
-  ## 4. 适用环境不同
-  ## 5. 一句话总结
-- 算法名保持一致：如果论文标题是 HMA-RRT，不要整篇写成 HMA-RRT*；如需说明 RRT*，写成“基于 RRT* 框架”。
-"""
+    base = (
+        "请使用清晰自然的中文回答。\n"
+        "- 回答结构应围绕用户问题组织，不要固定套模板。\n"
+        "- 可以使用小标题、编号或 bullet list，但不强制。\n"
+        "- 对比、总结、优缺点、方法分析等任务，应围绕用户要求的维度自然展开。\n"
+        "- 算法名保持一致，例如 `RRT*`、`HA-RRT`、`HMA-RRT`、`Hybrid-RRT` 不要混写。\n"
+        "- 如无必要，优先用小标题和列表；仅在对比维度清晰时使用表格。\n"
+        "- 若有章节 metadata（`section_title`/`section_path_text`），关键结论尽量标注章节依据。\n"
+        "- 当用户要求论文列表、related work、作者、年份、DOI、期刊/会议、开放获取链接时，必须使用结构化列表，每篇论文单独一项：\n"
+        "  1. **Title**\n"
+        "     - Authors:\n"
+        "     - Year:\n"
+        "     - Venue:\n"
+        "     - DOI:\n"
+        "     - Source:\n"
+        "- DOI 缺失时写“未提供”，不要编造；作者过多时可列前 3 位 + et al. / 等。\n"
+        "- 来自本地 References 要标注“来源：本地论文 References”；来自 OpenAlex 标注“来源：OpenAlex”；来自 Web Search 标注“来源：Web”。\n"
+    )
 
     if is_general_question:
-        return base + """- 这是通用算法解释问题，可基于通用知识作答。
-- 不要强行声明知识库证据不足。
-"""
+        return base + "- 这是通用解释问题，可基于通用知识自然作答。\n"
 
     if has_local_evidence:
-        return base + """- 本轮已检索到本地知识库片段，回答应优先基于这些证据。
-- 仅在确实缺证据的小节说明“证据不足”。
-"""
+        return base + "- 可综合本地片段回答；片段未覆盖的具体点可在对应结论处说明边界。\n"
 
-    return base + """- 若用户在问指定论文且本轮未检索到证据，请简短说明证据不足。
-"""
-
+    return base + "- 若本轮缺少本地证据，避免把结论表述为论文原文事实。\n"

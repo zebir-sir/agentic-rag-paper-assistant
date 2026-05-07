@@ -1,4 +1,4 @@
-﻿import os
+import os
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -567,9 +567,11 @@ class ChatRuntime:
     deps: AgentDependencies
     requested_search_type: str
     effective_search_type: str
+    explicit_web_request: bool
     effective_use_web_search: bool
     use_react: bool
     full_prompt: str
+    langgraph_context_prompt: str
     compression_used: bool
     context_payload: Dict[str, Any]
     is_general_question: bool
@@ -618,7 +620,9 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
         has_local_evidence=has_local_evidence,
     )
 
-    full_prompt = context_payload["full_prompt"]
+    base_context_prompt = context_payload["full_prompt"]
+    langgraph_context_prompt = base_context_prompt
+    full_prompt = base_context_prompt
     full_prompt = _append_react_instruction(full_prompt, bool(request.use_react))
     if local_context:
         full_prompt = f"{full_prompt}\n\n{local_context}"
@@ -634,9 +638,11 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
         deps=deps,
         requested_search_type=requested_search_type,
         effective_search_type=str((deps.search_preferences or {}).get("default_search_type", requested_search_type)),
+        explicit_web_request=explicit_web_request,
         effective_use_web_search=effective_use_web_search,
         use_react=bool(request.use_react),
         full_prompt=full_prompt,
+        langgraph_context_prompt=langgraph_context_prompt,
         compression_used=bool(context_payload["compression_used"]),
         context_payload=context_payload,
         is_general_question=is_general_question,
@@ -648,86 +654,40 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
     )
 
 
-async def execute_agent(
+async def execute_prepared_chat_runtime(
     message: str,
-    session_id: str,
-    user_id: Optional[str] = None,
-    search_type: str = "hybrid",
-    use_web_search: bool = False,
-    use_react: bool = False,
+    runtime: ChatRuntime,
+    *,
     save_conversation: bool = True,
 ) -> tuple[str, List[ToolCall], bool, List[EvidenceSource], str, str, Dict[str, Any]]:
     try:
         backend = get_agent_backend()
         response_backend = backend
         workflow_metadata: Dict[str, Any] = {}
-        effective_search_type = _resolve_search_type(search_type)
-        explicit_web_request = _should_force_openalex(message)
-        effective_use_web_search = bool(use_web_search or explicit_web_request)
-        deps = AgentDependencies(
-            session_id=session_id,
-            user_id=user_id,
-            use_web_search=effective_use_web_search,
-            search_preferences={
-                "default_search_type": effective_search_type,
-                "default_limit": 10,
-            },
-        )
-        context_payload = await _prepare_agent_prompt(
-            session_id=session_id,
-            user_id=user_id,
-            user_message=message,
-        )
-        is_general_question = _is_general_algorithm_question(message)
-        may_need_general_web_search = _may_need_general_web_search(message)
-        is_local_question = _is_local_kb_question(message)
-        local_context = ""
-        if is_local_question:
-            local_context = await _run_local_kb_preflight_if_needed(message, deps)
+        deps = runtime.deps
+        compression_used = runtime.compression_used
+        effective_search_type = runtime.effective_search_type
 
-        has_local_evidence = bool(local_context)
-        format_instruction = _build_format_instruction(
-            has_local_evidence=has_local_evidence,
-            is_general_question=is_general_question,
-        )
-        tool_choice_instruction = _build_tool_choice_instruction(
-            is_general_question=is_general_question,
-            may_need_web=may_need_general_web_search,
-            has_local_evidence=has_local_evidence,
-        )
-
-        full_prompt = context_payload["full_prompt"]
-        full_prompt = _append_react_instruction(full_prompt, bool(use_react))
-        if local_context:
-            full_prompt = f"{full_prompt}\n\n{local_context}"
-        full_prompt = (
-            f"{full_prompt}\n\n[Tool selection guidance]\n{tool_choice_instruction}"
-            f"\n\n[Output format requirements]\n{format_instruction}"
-        )
-        if may_need_general_web_search and not is_general_web_search_enabled():
-            full_prompt = f"{full_prompt}\n\n[Web capability notice]\n{GENERAL_WEB_UNAVAILABLE_INSTRUCTION}"
-        compression_used = bool(context_payload["compression_used"])
-
-        if context_payload["summary_updated"]:
+        if runtime.context_payload["summary_updated"]:
             await update_session_memory_metadata(
-                session_id=session_id,
-                latest_summary=context_payload["latest_summary"],
-                compression_count=context_payload["compression_count"],
-                compacted_message_count=context_payload["compacted_message_count"],
+                session_id=runtime.session_id,
+                latest_summary=runtime.context_payload["latest_summary"],
+                compression_count=runtime.context_payload["compression_count"],
+                compacted_message_count=runtime.context_payload["compacted_message_count"],
             )
 
         openalex_first_result = None
-        if explicit_web_request:
+        if runtime.explicit_web_request:
             openalex_first_result = await _run_openalex_first_if_needed(message=message, deps=deps)
         if openalex_first_result is not None:
             response, tools_used, sources, workflow_metadata = openalex_first_result
             response_backend = "openalex_first"
         else:
-            if bool(use_react) and backend == "langchain":
+            if runtime.use_react and backend == "langchain":
                 graph_result = await run_langgraph_analysis(
                     question=message,
                     deps=deps,
-                    context_prompt=full_prompt,
+                    context_prompt=runtime.langgraph_context_prompt,
                 )
                 response = str(getattr(graph_result, "message", "") or "")
                 tools_used = list(getattr(graph_result, "tools_used", []) or [])
@@ -735,14 +695,14 @@ async def execute_agent(
                 workflow_metadata = dict(getattr(graph_result, "metadata", {}) or {})
                 response_backend = "langgraph"
             else:
-                result = await run_agent(full_prompt, deps=deps)
+                result = await run_agent(runtime.full_prompt, deps=deps)
                 if _is_langchain_agent_result(result):
                     response = str(getattr(result, "message", "") or "")
                     tools_used = list(getattr(result, "tools_used", []) or [])
                     sources = list(getattr(result, "sources", []) or [])
                     if is_degenerate_answer(response):
                         logger.warning("Detected degenerate answer in /chat normal path; retrying once.")
-                        retry_result = await retry_langchain_agent_after_degenerate(full_prompt, deps)
+                        retry_result = await retry_langchain_agent_after_degenerate(runtime.full_prompt, deps)
                         response = str(getattr(retry_result, "message", "") or "")
                         tools_used = list(getattr(retry_result, "tools_used", []) or [])
                         sources = list(getattr(retry_result, "sources", []) or [])
@@ -750,15 +710,19 @@ async def execute_agent(
                     response = str(result.output)
                     tools_used = extract_tool_calls(result)
                     sources = extract_evidence_sources(deps)
-        if not sources:
+
+        strict_langgraph_scope = (
+            response_backend == "langgraph"
+            and str((workflow_metadata or {}).get("scope_policy") or "") == "strict_target"
+        )
+        if not sources and not strict_langgraph_scope:
             sources = list(getattr(deps, "retrieved_sources", []) or [])
         sources = _dedupe_sources(sources)
         response = _normalize_web_unavailable_reply(
             response,
-            requested_web=bool(use_web_search),
+            requested_web=runtime.effective_use_web_search,
             sources=sources,
         )
-        # Lightweight markdown post-processing
         response = clean_markdown_spacing(response)
         sources_dict = [source.model_dump() for source in sources]
 
@@ -784,48 +748,48 @@ async def execute_agent(
         if save_conversation:
             if str(response or "").strip():
                 await save_conversation_turn(
-                    session_id=session_id,
+                    session_id=runtime.session_id,
                     user_message=message,
                     assistant_message=response,
                     user_metadata={
-                        "user_id": user_id,
+                        "user_id": deps.user_id,
                         "compression_used": compression_used,
-                        "requested_search_type": str(search_type),
+                        "requested_search_type": runtime.requested_search_type,
                         "effective_search_type": effective_search_type,
                         "use_web_search": deps.use_web_search,
-                        "use_react": bool(use_react),
+                        "use_react": runtime.use_react,
                         "agent_backend": response_backend,
                         **safe_workflow_metadata,
                     },
                     assistant_metadata={
                         "tool_calls": len(tools_used),
                         "compression_used": compression_used,
-                        "requested_search_type": str(search_type),
+                        "requested_search_type": runtime.requested_search_type,
                         "effective_search_type": effective_search_type,
                         "sources": sources_dict,
                         "use_web_search": deps.use_web_search,
-                        "use_react": bool(use_react),
+                        "use_react": runtime.use_react,
                         "agent_backend": response_backend,
                         **safe_workflow_metadata,
                     },
                 )
             else:
                 await add_message(
-                    session_id=session_id,
+                    session_id=runtime.session_id,
                     role="user",
                     content=message,
                     metadata={
-                        "user_id": user_id,
+                        "user_id": deps.user_id,
                         "compression_used": compression_used,
-                        "requested_search_type": str(search_type),
+                        "requested_search_type": runtime.requested_search_type,
                         "effective_search_type": effective_search_type,
                         "use_web_search": deps.use_web_search,
-                        "use_react": bool(use_react),
+                        "use_react": runtime.use_react,
                         "agent_backend": response_backend,
                         **safe_workflow_metadata,
                     },
                 )
-                await refresh_session_metadata(session_id)
+                await refresh_session_metadata(runtime.session_id)
 
         return (
             response,
@@ -836,27 +800,27 @@ async def execute_agent(
             response_backend,
             safe_workflow_metadata,
         )
-
     except Exception as e:
         logger.error(f"Agent execution failed: {e}")
         error_response = f"I encountered an error while processing your request: {str(e)}"
 
         if save_conversation:
             await save_conversation_turn(
-                session_id=session_id,
+                session_id=runtime.session_id,
                 user_message=message,
                 assistant_message=error_response,
                 user_metadata={
+                    "user_id": runtime.deps.user_id,
                     "compression_used": False,
-                    "requested_search_type": str(search_type),
-                    "effective_search_type": _resolve_search_type(search_type),
+                    "requested_search_type": runtime.requested_search_type,
+                    "effective_search_type": runtime.effective_search_type,
                     "agent_backend": get_agent_backend(),
                 },
                 assistant_metadata={
                     "error": str(e),
                     "compression_used": False,
-                    "requested_search_type": str(search_type),
-                    "effective_search_type": _resolve_search_type(search_type),
+                    "requested_search_type": runtime.requested_search_type,
+                    "effective_search_type": runtime.effective_search_type,
                     "sources": [],
                     "agent_backend": get_agent_backend(),
                 },
@@ -867,10 +831,35 @@ async def execute_agent(
             [],
             False,
             [],
-            _resolve_search_type(search_type),
+            runtime.effective_search_type,
             get_agent_backend(),
             {},
         )
+
+
+async def execute_agent(
+    message: str,
+    session_id: str,
+    user_id: Optional[str] = None,
+    search_type: str = "hybrid",
+    use_web_search: bool = False,
+    use_react: bool = False,
+    save_conversation: bool = True,
+) -> tuple[str, List[ToolCall], bool, List[EvidenceSource], str, str, Dict[str, Any]]:
+    request = ChatRequest(
+        message=message,
+        session_id=session_id,
+        user_id=user_id,
+        search_type=search_type,
+        use_web_search=use_web_search,
+        use_react=use_react,
+    )
+    runtime = await prepare_chat_runtime(request)
+    return await execute_prepared_chat_runtime(
+        message,
+        runtime,
+        save_conversation=save_conversation,
+    )
 
 
 @app.get("/health", response_model=HealthStatus)
@@ -930,13 +919,9 @@ async def chat(request: ChatRequest):
             effective_search_type,
             response_backend,
             workflow_metadata,
-        ) = await execute_agent(
-            message=request.message,
-            session_id=session_id,
-            user_id=request.user_id,
-            search_type=requested_search_type,
-            use_web_search=runtime.effective_use_web_search,
-            use_react=runtime.use_react,
+        ) = await execute_prepared_chat_runtime(
+            request.message,
+            runtime,
         )
         return ChatResponse(
             message=response,
@@ -975,9 +960,22 @@ async def chat_stream(request: ChatRequest):
                         timeout=STREAM_PREPARE_TIMEOUT_SECONDS,
                     )
                 except TimeoutError:
-                    logger.warning("Stream prepare runtime timed out")
-                    yield sse_event("status", content="Local retrieval timed out. Trying to answer from retrieved context...")
-                    yield sse_event("error", content="Local knowledge-base retrieval timed out. Please retry later or narrow the question.")
+                    logger.warning(
+                        "Stream timeout at stage=%s session_id=%s use_react=%s agent_backend=%s timeout_seconds=%s",
+                        "prepare_chat_runtime",
+                        session_id,
+                        bool(getattr(request, "use_react", False)),
+                        get_agent_backend(),
+                        STREAM_PREPARE_TIMEOUT_SECONDS,
+                    )
+                    yield sse_event(
+                        "status",
+                        content="Request preparation timed out while building runtime context.",
+                    )
+                    yield sse_event(
+                        "error",
+                        content="Request preparation timed out while building local retrieval/runtime context. Please check API logs or narrow the question.",
+                    )
                     yield sse_event("end")
                     return
                 explicit_web_request = _should_force_openalex(request.message)
@@ -992,6 +990,7 @@ async def chat_stream(request: ChatRequest):
                 is_local_question = runtime.is_local_question
                 has_local_evidence = runtime.has_local_evidence
                 full_prompt = runtime.full_prompt
+                langgraph_context_prompt = runtime.langgraph_context_prompt
                 compression_used = runtime.compression_used
 
                 if context_payload["summary_updated"]:
@@ -1111,7 +1110,7 @@ async def chat_stream(request: ChatRequest):
                         run_langgraph_analysis(
                             question=request.message,
                             deps=deps,
-                            context_prompt=full_prompt,
+                            context_prompt=langgraph_context_prompt,
                             progress_callback=progress_callback,
                         )
                     )
@@ -1274,7 +1273,11 @@ async def chat_stream(request: ChatRequest):
                             full_response = GENERATION_RETRY_FAILED_MESSAGE
                             yield sse_event("text", content=full_response)
 
-                if not sources:
+                strict_langgraph_scope = (
+                    response_backend == "langgraph"
+                    and str((workflow_metadata or {}).get("scope_policy") or "") == "strict_target"
+                )
+                if not sources and not strict_langgraph_scope:
                     sources = list(getattr(deps, "retrieved_sources", []) or [])
                 sources = _dedupe_sources(sources)
                 if not had_user_visible_text:
@@ -1350,7 +1353,12 @@ async def chat_stream(request: ChatRequest):
 
             except Exception as e:
                 logger.exception("Stream error: %s", e)
-                yield sse_event("error", content="Local knowledge-base retrieval timed out. Please retry later or narrow the question.")
+                error_type = type(e).__name__
+                error_message = str(e)[:300]
+                yield sse_event(
+                    "error",
+                    content=f"Deep analysis stream failed: {error_type}: {error_message}",
+                )
                 yield sse_event("end")
 
         return stream_response(generate_stream())
@@ -1505,8 +1513,6 @@ if __name__ == "__main__":
         reload=APP_ENV == "development",
         log_level=LOG_LEVEL.lower(),
     )
-
-
 
 
 

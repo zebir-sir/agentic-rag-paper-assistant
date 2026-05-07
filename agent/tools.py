@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from .db_utils import (
     vector_search,
     hybrid_search,
+    section_search,
     get_document,
     list_documents,
     get_document_chunks,
@@ -62,6 +63,13 @@ class HybridSearchInput(BaseModel):
     query: str = Field(..., description="Search query")
     limit: int = Field(default=10, description="Maximum number of results")
     text_weight: float = Field(default=0.3, description="Weight for text similarity (0-1)")
+
+
+class SectionSearchInput(BaseModel):
+    query: str = Field(..., description="Content query within the section")
+    section_query: str = Field(..., description="Section title/path keyword, e.g. Method, Experiments, References")
+    document_id: Optional[str] = Field(default=None, description="Optional document UUID to restrict search")
+    limit: int = Field(default=10, ge=1, le=50)
 
 
 class DocumentInput(BaseModel):
@@ -530,6 +538,34 @@ async def hybrid_search_tool(input_data: HybridSearchInput) -> List[ChunkResult]
         ]
     except Exception as e:
         logger.exception("Hybrid search failed: %s", e)
+        raise
+
+
+async def section_search_tool(input_data: SectionSearchInput) -> List[ChunkResult]:
+    try:
+        results = await asyncio.wait_for(
+            section_search(
+                query_text=input_data.query,
+                section_query=input_data.section_query,
+                document_id=input_data.document_id,
+                limit=input_data.limit,
+            ),
+            timeout=LOCAL_SEARCH_TIMEOUT_SECONDS,
+        )
+        return [
+            ChunkResult(
+                chunk_id=str(r["chunk_id"]),
+                document_id=str(r["document_id"]),
+                content=r["content"],
+                score=float(r["combined_score"]),
+                metadata=r["metadata"],
+                document_title=r["document_title"],
+                document_source=r["document_source"],
+            )
+            for r in results
+        ]
+    except Exception as e:
+        logger.exception("Section search failed: %s", e)
         raise
 
 

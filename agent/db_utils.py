@@ -1,6 +1,7 @@
 
 import os
 import json
+import re
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
@@ -627,6 +628,138 @@ async def hybrid_search(
             }
             for row in results
         ]
+
+
+async def section_search(
+    query_text: str,
+    limit: int = 10,
+    document_id: Optional[str] = None,
+    section_query: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Search chunks within section-aware metadata (section_title/section_path_text).
+    This does not change vector/hybrid behavior and is a standalone retrieval path.
+    """
+    async with db_pool.acquire() as conn:
+        safe_limit = max(1, min(int(limit or 10), 50))
+        query_value = str(query_text or "").strip()
+        section_value = str(section_query or "").strip()
+        normalized_section_value = re.sub(r"[\s\W_]+", "", section_value.lower(), flags=re.UNICODE)
+
+        conditions: List[str] = []
+        params: List[Any] = []
+        idx = 1
+
+        # Prefer section-aware chunks for this tool.
+        conditions.append(
+            "("
+            "COALESCE(c.metadata->>'section_title','') <> '' "
+            "OR COALESCE(c.metadata->>'section_path_text','') <> ''"
+            ")"
+        )
+
+        if section_value:
+            section_like = f"%{section_value}%"
+            normalized_section_like = f"%{normalized_section_value}%"
+            conditions.append(
+                "("
+                f"LOWER(COALESCE(c.metadata->>'section_title','')) LIKE LOWER(${idx}) "
+                f"OR LOWER(COALESCE(c.metadata->>'section_path_text','')) LIKE LOWER(${idx}) "
+                f"OR regexp_replace(lower(COALESCE(c.metadata->>'section_title','')), '[[:space:][:punct:]_]+', '', 'g') LIKE ${idx + 1} "
+                f"OR regexp_replace(lower(COALESCE(c.metadata->>'section_path_text','')), '[[:space:][:punct:]_]+', '', 'g') LIKE ${idx + 1}"
+                ")"
+            )
+            params.append(section_like)
+            params.append(normalized_section_like)
+            idx += 2
+
+        if document_id:
+            conditions.append(f"d.id = ${idx}::uuid")
+            params.append(document_id)
+            idx += 1
+
+        score_param_idx: Optional[int] = None
+        if query_value and not section_value:
+            query_like = f"%{query_value}%"
+            conditions.append(
+                "("
+                f"c.content ILIKE ${idx} "
+                f"OR COALESCE(c.metadata->>'section_title','') ILIKE ${idx} "
+                f"OR COALESCE(c.metadata->>'section_path_text','') ILIKE ${idx}"
+                ")"
+            )
+            params.append(query_like)
+            score_param_idx = idx
+            idx += 1
+        elif query_value:
+            query_like = f"%{query_value}%"
+            params.append(query_like)
+            score_param_idx = idx
+            idx += 1
+
+        where_sql = " AND ".join(conditions) if conditions else "TRUE"
+
+        # query_text only affects light scoring when section_query/document_id already matched.
+        if score_param_idx is not None:
+            score_expr = (
+                f"CASE WHEN c.content ILIKE ${score_param_idx} "
+                f"OR COALESCE(c.metadata->>'section_title','') ILIKE ${score_param_idx} "
+                f"OR COALESCE(c.metadata->>'section_path_text','') ILIKE ${score_param_idx} "
+                "THEN 1.0 ELSE 0.5 END"
+            )
+        else:
+            score_expr = "0.5"
+
+        sql = f"""
+            SELECT
+                c.id::text AS chunk_id,
+                c.document_id::text AS document_id,
+                c.content AS content,
+                {score_expr}::float8 AS combined_score,
+                NULL::float8 AS vector_similarity,
+                {score_expr}::float8 AS text_similarity,
+                c.metadata AS metadata,
+                d.title AS document_title,
+                d.source AS document_source
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE {where_sql}
+            ORDER BY
+                COALESCE((c.metadata->>'section_start_line')::int, 2147483647) ASC,
+                COALESCE((c.metadata->>'section_chunk_index')::int, 2147483647) ASC,
+                COALESCE(c.chunk_index, 2147483647) ASC
+            LIMIT ${idx}
+        """
+        params.append(safe_limit)
+        rows = await conn.fetch(sql, *params)
+
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            metadata_raw = row["metadata"]
+            if isinstance(metadata_raw, str):
+                try:
+                    metadata_value = json.loads(metadata_raw)
+                except Exception:
+                    metadata_value = {}
+            elif isinstance(metadata_raw, dict):
+                metadata_value = metadata_raw
+            else:
+                metadata_value = dict(metadata_raw or {})
+
+            out.append(
+                {
+                    "chunk_id": row["chunk_id"],
+                    "document_id": row["document_id"],
+                    "content": row["content"],
+                    "combined_score": float(row["combined_score"]),
+                    "vector_similarity": row["vector_similarity"],
+                    "text_similarity": float(row["text_similarity"]),
+                    "metadata": metadata_value,
+                    "document_title": row["document_title"],
+                    "document_source": row["document_source"],
+                }
+            )
+        return out
 
 # 分块管理函数
 async def get_document_chunks(document_id: str) -> List[Dict[str, Any]]:

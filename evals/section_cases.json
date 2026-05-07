@@ -1,0 +1,92 @@
+﻿[
+  {
+    "id": "section_001",
+    "query": "总结核心贡献",
+    "section_query": "Abstract",
+    "expected_document_keywords": ["Hybrid-RRT"],
+    "expected_section_keywords": ["Abstract", "A B S T R A C T"],
+    "expected_content_keywords": ["hybrid", "sampling", "RRT"],
+    "notes": "section_search 应返回 Abstract 附近章节块"
+  },
+  {
+    "id": "section_002",
+    "query": "方法流程和关键步骤",
+    "section_query": "Method",
+    "expected_document_keywords": ["Hybrid-RRT"],
+    "expected_section_keywords": ["Method", "Methodology", "Approach"],
+    "expected_content_keywords": ["algorithm", "step", "sampling"],
+    "notes": "检查 Method 过滤效果"
+  },
+  {
+    "id": "section_003",
+    "query": "伪代码与流程描述",
+    "section_query": "Algorithm",
+    "expected_document_keywords": ["HA-RRT"],
+    "expected_section_keywords": ["Algorithm", "Method"],
+    "expected_content_keywords": ["algorithm", "pseudo-code", "RRT"],
+    "notes": "应优先命中算法相关 section"
+  },
+  {
+    "id": "section_004",
+    "query": "实验设置和参数",
+    "section_query": "Experiments",
+    "expected_document_keywords": ["HMA-RRT"],
+    "expected_section_keywords": ["Experiments", "Experiment", "Evaluation"],
+    "expected_content_keywords": ["experiment", "parameter", "setup"],
+    "notes": "对比 section_search 与 global hybrid"
+  },
+  {
+    "id": "section_005",
+    "query": "性能结果与对比结论",
+    "section_query": "Results",
+    "expected_document_keywords": ["Hybrid-RRT"],
+    "expected_section_keywords": ["Results", "Evaluation", "Discussion"],
+    "expected_content_keywords": ["performance", "comparison", "success rate"],
+    "notes": "结果章节精确命中"
+  },
+  {
+    "id": "section_006",
+    "query": "总结优缺点和局限",
+    "section_query": "Conclusion",
+    "expected_document_keywords": ["HA-RRT"],
+    "expected_section_keywords": ["Conclusion", "Discussion"],
+    "expected_content_keywords": ["conclusion", "limitation", "future"],
+    "notes": "结论章节检索"
+  },
+  {
+    "id": "section_007",
+    "query": "参考文献中与 USV 相关的线索",
+    "section_query": "References",
+    "expected_document_keywords": ["HMA-RRT"],
+    "expected_section_keywords": ["References", "Reference"],
+    "expected_content_keywords": ["USV", "marine", "path planning"],
+    "notes": "References 章节过滤"
+  },
+  {
+    "id": "section_008",
+    "query": "与背景相关的问题定义",
+    "section_query": "Introduction",
+    "expected_document_keywords": ["HA-RRT", "Hybrid-RRT"],
+    "expected_section_keywords": ["Introduction", "Background", "Related Work"],
+    "expected_content_keywords": ["problem", "path planning", "challenge"],
+    "notes": "引言/背景章节命中"
+  },
+  {
+    "id": "section_009",
+    "query": "多策略自适应机制说明",
+    "section_query": "Method",
+    "expected_document_keywords": ["HMA-RRT"],
+    "expected_section_keywords": ["Method", "Approach", "Algorithm"],
+    "expected_content_keywords": ["multi-strategy", "adaptive", "heuristic"],
+    "notes": "HMA-RRT 方法章节聚焦"
+  },
+  {
+    "id": "section_010",
+    "query": "海上场景实验说明",
+    "section_query": "Experiments",
+    "expected_document_keywords": ["HA-RRT", "HMA-RRT", "Hybrid-RRT"],
+    "expected_section_keywords": ["Experiments", "Evaluation", "Results"],
+    "expected_content_keywords": ["ship", "USV", "scenario"],
+    "notes": "覆盖三篇论文的实验章节命中"
+  }
+]

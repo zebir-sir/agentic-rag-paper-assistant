@@ -82,6 +82,45 @@ def _source_title(source: Dict[str, Any]) -> str:
     return alias_title or make_friendly_title(raw_title, raw_source) or "论文"
 
 
+def _section_caption(metadata: Dict[str, Any]) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+
+    section_path_text = str(metadata.get("section_path_text") or "").strip()
+    section_title = str(metadata.get("section_title") or "").strip()
+    section_label = section_path_text or section_title
+    if not section_label:
+        return ""
+
+    parts = [f"章节: {localize_paper_terms(section_label)}"]
+
+    def _safe_int(value: Any) -> int | None:
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    start_line = _safe_int(metadata.get("section_start_line"))
+    end_line = _safe_int(metadata.get("section_end_line"))
+    if start_line is not None and end_line is not None and start_line > 0 and end_line >= start_line:
+        parts.append(f"行号: {start_line}-{end_line}")
+
+    section_chunk_index = _safe_int(metadata.get("section_chunk_index"))
+    section_chunk_count = _safe_int(metadata.get("section_chunk_count"))
+    if (
+        section_chunk_index is not None
+        and section_chunk_count is not None
+        and section_chunk_count > 1
+        and section_chunk_index >= 0
+    ):
+        display_index = min(section_chunk_index + 1, section_chunk_count)
+        parts.append(f"分片: {display_index}/{section_chunk_count}")
+
+    return " · ".join(parts)
+
+
 def render_sources(
     sources: List[Dict[str, Any]],
     base_url: str,
@@ -109,6 +148,9 @@ def render_sources(
                 raw_source = source.get("document_source") or ""
                 if raw_source:
                     st.caption(f"来源: {localize_paper_terms(raw_source)}")
+                section_caption = _section_caption(metadata)
+                if section_caption:
+                    st.caption(section_caption)
                 render_plain_snippet(snippet)
                 if metadata.get("doi"):
                     st.caption(f"DOI: {metadata.get('doi')}")
@@ -203,26 +245,29 @@ def render_analysis_panel(
         col1, col2, col3 = st.columns(3)
         col4, col5, col6 = st.columns(3)
         if col1.button("快速总结", use_container_width=True):
-            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_summary_prompt(selected_title))
+            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_summary_prompt(selected_title, selected_doc_id))
         if col2.button("创新点分析", use_container_width=True):
-            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_innovation_prompt(selected_title))
+            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_innovation_prompt(selected_title, selected_doc_id))
         if col3.button("方法流程", use_container_width=True):
-            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_method_prompt(selected_title))
+            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_method_prompt(selected_title, selected_doc_id))
         if col4.button("实验解读", use_container_width=True):
-            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_experiment_prompt(selected_title))
+            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_experiment_prompt(selected_title, selected_doc_id))
         if col5.button("局限性分析", use_container_width=True):
-            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_limitation_prompt(selected_title))
+            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_limitation_prompt(selected_title, selected_doc_id))
         if col6.button("对我研究的启发", use_container_width=True):
-            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_inspiration_prompt(selected_title))
+            st.warning("请先选择 1 篇论文。") if not selected_doc_id else set_pending_prompt(build_single_inspiration_prompt(selected_title, selected_doc_id))
     else:
         selected_doc_ids = st.multiselect("选择论文（2~3 篇）", options=options, format_func=fmt, max_selections=3)
-        selected_titles = [fmt(doc_id) for doc_id in selected_doc_ids]
+        selected_papers = [
+            {"title": fmt(doc_id), "document_id": doc_id}
+            for doc_id in selected_doc_ids
+        ]
         c1, c2, c3, c4 = st.columns(4)
         if c1.button("核心问题对比", use_container_width=True):
-            st.warning("多篇对比至少选择 2 篇论文。") if len(selected_titles) < 2 else set_pending_prompt(build_multi_problem_compare_prompt(selected_titles))
+            st.warning("多篇对比至少选择 2 篇论文。") if len(selected_papers) < 2 else set_pending_prompt(build_multi_problem_compare_prompt(selected_papers))
         if c2.button("方法与创新点对比", use_container_width=True):
-            st.warning("多篇对比至少选择 2 篇论文。") if len(selected_titles) < 2 else set_pending_prompt(build_multi_method_compare_prompt(selected_titles))
+            st.warning("多篇对比至少选择 2 篇论文。") if len(selected_papers) < 2 else set_pending_prompt(build_multi_method_compare_prompt(selected_papers))
         if c3.button("实验与结果对比", use_container_width=True):
-            st.warning("多篇对比至少选择 2 篇论文。") if len(selected_titles) < 2 else set_pending_prompt(build_multi_experiment_compare_prompt(selected_titles))
+            st.warning("多篇对比至少选择 2 篇论文。") if len(selected_papers) < 2 else set_pending_prompt(build_multi_experiment_compare_prompt(selected_papers))
         if c4.button("适用场景与借鉴价值", use_container_width=True):
-            st.warning("多篇对比至少选择 2 篇论文。") if len(selected_titles) < 2 else set_pending_prompt(build_multi_value_compare_prompt(selected_titles))
+            st.warning("多篇对比至少选择 2 篇论文。") if len(selected_papers) < 2 else set_pending_prompt(build_multi_value_compare_prompt(selected_papers))

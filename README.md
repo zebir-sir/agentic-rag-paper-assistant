@@ -1,42 +1,120 @@
-# 科研论文阅读助手（Agentic RAG）
+﻿<div align="center">
 
-一个面向科研论文阅读、分析与文献对比的 **Agentic RAG** 系统。用户可以通过前端上传 PDF，系统自动完成文档解析、分块、向量化入库，并基于本地知识库、OpenAlex 学术检索与可选通用网页搜索，提供可追溯的论文问答与分析能力。
+# 📚 Agentic RAG Paper Assistant
 
-适合用于：
+**集论文知识库、学术检索、通用网页搜索与证据追踪于一体的 Agentic RAG 系统**
 
-- 快速总结论文的研究问题、核心方法与创新点
-- 拆解方法流程、实验设置、评价指标与局限性
-- 对比多篇论文的研究问题、方法差异与适用场景
-- 补充 related work、作者、年份、DOI 与来源链接
-- 构建本地/私有化科研论文知识库问答系统
+基于 **FastAPI + Streamlit + PostgreSQL/pgvector + LangChain/LangGraph** 构建，支持 PDF 论文入库、结构化切块、章节级检索、OpenAlex 学术检索、通用网页搜索、流式问答与可追溯证据展示。
+
+<br />
+
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?style=for-the-badge&logo=fastapi&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-UI-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)
+![LangGraph](https://img.shields.io/badge/LangGraph-Agentic_Workflow-1C3C3C?style=for-the-badge)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL_%2B_pgvector-Vector_DB-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
+
+<br />
+
+[项目简介](#-项目简介) ·
+[界面预览](#️-界面预览) ·
+[功能亮点](#-功能亮点) ·
+[系统架构](#️-系统架构) ·
+[评测结果](#-评测与效果验证) ·
+[快速开始](#-快速开始) ·
+[使用示例](#-使用示例) ·
+[API](#-api-概览)
+
+</div>
 
 ---
 
-## ✨ 功能特性
+## 📌 项目简介
 
-| 模块 | 能力 |
+**Agentic RAG Paper Assistant** 是一个以科研论文阅读为核心、同时支持开放域网页检索的 Agentic RAG 系统。用户可以上传 PDF 论文，系统自动完成 Docling 解析、章节感知切块、embedding 入库，并通过 Agent 工具完成论文总结、方法拆解、实验解读、创新点分析和多篇论文对比。
+
+系统同时支持三类外部/内部知识来源：
+
+| 来源 | 作用 |
 |---|---|
-| 文档入库 | 前端上传 PDF、后台入库任务、进度条、取消任务 |
-| RAG 检索 | 支持 `vector` / `hybrid` 检索，基于 PostgreSQL + pgvector |
-| Agent 工具 | 本地知识库检索、文档读取、OpenAlex 学术检索、通用 Web Search |
-| 深度分析 | 使用 LangGraph 编排文档检查、检索、生成与证据检查流程 |
-| 会话系统 | 支持 session 持久化、历史会话恢复、长对话摘要压缩 |
-| 前端体验 | Streamlit 聊天界面、论文分析面板、SSE 流式输出、停止生成 |
-| 证据追踪 | 本地知识库来源与网页来源结构化回传，并在前端分组展示 |
+| 本地论文知识库 | 基于用户上传 PDF 的全文证据回答论文问题 |
+| OpenAlex 学术检索 | 查询知识库外论文、related work、作者、年份、DOI 和开放获取链接 |
+| 通用 Web Search | 查询普通网页资料、技术解释、最新信息和非论文来源 |
+| 模型通用知识 | 用于补充解释，但不伪装成本地论文证据 |
+
+相比普通“向量检索 + LLM 总结”的 RAG Demo，本项目重点实现了：
+
+- **Agentic RAG 工作流**：基于 LangGraph 实现检索评估、query rewrite、retry retrieval 和证据检查。
+- **Section-aware Chunking**：按论文 Markdown 标题结构识别章节，记录章节路径、行号和章节内分片序号。
+- **Section-level Retrieval**：支持基于 `section_title / section_path_text` 的章节级过滤检索。
+- **多来源证据追踪**：区分本地论文证据、OpenAlex 学术元数据、网页来源和模型通用知识。
+- **轻量评测闭环**：提供普通检索、章节检索 A/B、多轮检索闭环三类评测脚本。
+
+> 当前项目适合本地或私有化部署，用于展示 Agentic RAG、论文结构化检索、开放域检索接入和工程化评测能力；不是生产级多用户 SaaS 平台。
 
 ---
 
-## 🧱 技术栈
+## 🖼️ 界面预览
 
-- Python 3.11+
-- FastAPI
-- Streamlit
-- LangChain
-- LangGraph
-- PostgreSQL / pgvector
-- Docling
-- OpenAI-compatible LLM / Embedding API
-- Docker Compose
+将实测截图放入 `docs/assets/` 后，GitHub 会自动渲染。
+
+| 聊天问答 | 论文分析面板 | 章节级证据 |
+|---|---|---|
+| ![聊天问答](docs/assets/chat-demo.png) | ![论文分析面板](docs/assets/analysis-panel.png) | ![章节级证据](docs/assets/section-evidence.png) |
+| 流式回答、历史会话、工具开关 | 上传论文、单篇分析、多篇对比 | 显示 Section、行号与分片序号 |
+
+| 深度分析 | OpenAlex 学术检索 |
+|---|---|
+| ![深度分析](docs/assets/deep-analysis.png) | ![OpenAlex 学术检索](docs/assets/openalex-search.png) |
+| LangGraph 多轮检索与复杂问题分析 | related work、作者、年份、DOI 与来源链接 |
+---
+
+## ✨ 功能亮点
+
+<table>
+  <tr>
+    <td width="50%">
+      <h3>📄 PDF 论文入库</h3>
+      <p>前端上传 PDF，后端异步解析、切块、embedding 入库，并支持进度展示和取消任务。</p>
+    </td>
+    <td width="50%">
+      <h3>🧩 Section-aware Chunking</h3>
+      <p>基于 Docling 输出的 Markdown 标题识别论文结构；长章节继续递归切块，保留章节标题、章节路径、行号和分片序号。</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <h3>🔎 向量 / 混合检索</h3>
+      <p>基于 PostgreSQL + pgvector 构建本地知识库检索，支持 vector search 与 hybrid search。</p>
+    </td>
+    <td width="50%">
+      <h3>🎯 章节级精准检索</h3>
+      <p>新增 <code>section_search</code> 工具，可按 <code>section_title</code> 或 <code>section_path_text</code> 过滤目标章节，并按原文顺序返回。</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <h3>🧠 LangGraph 多轮检索闭环</h3>
+      <p>检索不足时自动评估覆盖度、生成改写 query 并重试检索，提升复杂论文问题的召回稳定性。</p>
+    </td>
+    <td width="50%">
+      <h3>🔬 OpenAlex 学术检索</h3>
+      <p>用于查找知识库外论文、related work、作者、年份、DOI 和开放获取链接，可辅助扩展本地论文库。</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <h3>🌐 通用网页搜索</h3>
+      <p>配置 Web Search provider 后，可回答普通网页资料、技术解释、最新信息和非论文来源问题，并区分网页来源与本地论文证据。</p>
+    </td>
+    <td width="50%">
+      <h3>📍 证据来源追踪</h3>
+      <p>回答下方展示本地知识库、OpenAlex 或网页来源片段，并尽量标注文档、章节、行号和分片序号。</p>
+    </td>
+  </tr>
+</table>
 
 ---
 
@@ -44,25 +122,205 @@
 
 ```mermaid
 flowchart LR
-    U[User / Streamlit UI] --> A[FastAPI Backend]
+    User[User] --> UI[Streamlit UI]
+    UI --> API[FastAPI Backend]
 
-    A --> C[Chat / Stream API]
-    A --> I[Ingestion Job Manager]
+    subgraph Ingestion[PDF Ingestion Pipeline]
+        PDF[PDF Files] --> Docling[Docling Parser]
+        Docling --> Chunker[Section-aware Chunking]
+        Chunker --> Embed[Embedding]
+        Embed --> DB[(PostgreSQL + pgvector)]
+    end
 
-    I --> P[PDF Parsing & Chunking]
-    P --> E[Embedding]
-    E --> V[(PostgreSQL + pgvector)]
+    subgraph Runtime[Agentic RAG Runtime]
+        API --> Chat[Chat / Stream API]
+        Chat --> Search[Vector / Hybrid / Section Search]
+        Search --> DB
+        Chat --> Graph[LangGraph Workflow]
+        Graph --> Eval[Retrieval Evaluation]
+        Eval --> Rewrite[Query Rewrite]
+        Rewrite --> Search
+        Graph --> Answer[Answer Generation]
+    end
 
-    C --> R[Retriever]
-    R --> V
-
-    C --> G[LangChain / LangGraph Agent]
-    G --> O[OpenAlex]
-    G --> W[Optional Web Search]
-    G --> S[Evidence Sources]
-
-    S --> U
+    Chat --> OpenAlex[OpenAlex Academic Search]
+    Chat --> Web[General Web Search]
+    Answer --> Sources[Evidence Sources]
+    Sources --> UI
 ```
+
+---
+
+## 🔁 核心工作流
+
+### 1. PDF 入库流程
+
+```mermaid
+flowchart LR
+    A[Upload PDF] --> B[Docling Markdown]
+    B --> C[Section-aware Chunking]
+    C --> D[Chunk Metadata]
+    D --> E[Embedding]
+    E --> F[(PostgreSQL + pgvector)]
+```
+
+### 2. Agentic RAG 问答流程
+
+```mermaid
+flowchart TD
+    Q[User Query] --> S[Scope Resolve]
+    S --> R[Initial Retrieval]
+    R --> G[Retrieval Evaluation]
+    G -->|Sufficient| A[Answer Generation]
+    G -->|Insufficient| W[Query Rewrite]
+    W --> R2[Retry Retrieval]
+    R2 --> G
+    A --> C[Evidence Check]
+    C --> F[Final Answer + Sources]
+```
+
+### 3. 章节级检索流程
+
+```mermaid
+flowchart LR
+    Q[Section Query] --> T[section_search]
+    T --> M[Filter by section_title / section_path_text]
+    M --> O[Order by section_start_line / section_chunk_index]
+    O --> E[Evidence Snippets]
+```
+
+### 4. 外部检索来源边界
+
+```mermaid
+flowchart TD
+    Q[User Question] --> Router[Tool Routing]
+    Router -->|Uploaded papers| Local[Local Knowledge Base]
+    Router -->|Papers / related work / DOI| OA[OpenAlex]
+    Router -->|Web pages / latest info / daily questions| Web[General Web Search]
+    Local --> Evidence[Evidence Sources]
+    OA --> Evidence
+    Web --> Evidence
+    Evidence --> Answer[Grounded Answer]
+```
+
+---
+
+## 🧩 Section-aware Chunking
+
+本项目针对论文 PDF 的结构特点，对普通 chunking 做了增强：
+
+```mermaid
+flowchart TD
+    A[PDF] --> B[Docling Markdown]
+    B --> C{Has Markdown Headings?}
+    C -- Yes --> D[Parse Sections]
+    D --> E[Split by Section]
+    E --> F{Section Too Long?}
+    F -- No --> G[section chunk]
+    F -- Yes --> H[section_recursive chunks]
+    G --> I[Write Section Metadata]
+    H --> I
+    C -- No --> J[Semantic / Recursive Fallback]
+    I --> K[Embedding + Storage]
+    J --> K
+```
+
+每个章节感知 chunk 会保存类似 metadata：
+
+```json
+{
+  "section_title": "3.1. Proposed hybrid-RRT* framework",
+  "section_path_text": "Expert Systems With Applications > 3.1. Proposed hybrid-RRT* framework",
+  "section_start_line": 120,
+  "section_end_line": 180,
+  "section_chunk_index": 1,
+  "section_chunk_count": 4,
+  "chunk_method": "section_recursive"
+}
+```
+
+同时，chunk content 会写入章节上下文前缀，让 embedding 和文本检索都能感知章节语义：
+
+```text
+[Section: Method > Hybrid Sampling]
+[Chunk: Method > Hybrid Sampling · Part 2/4]
+
+The pseudo-code for the proposed Hybrid-RRT* framework is presented in Algorithm 6...
+```
+
+---
+
+## 🧪 评测与效果验证
+
+本项目补充了轻量评测集，用于验证普通检索、章节级检索和 LangGraph 多轮检索闭环。评测集不是大规模 benchmark，但能验证核心链路是否有效。
+
+### A. Retrieval Eval（limit=5）
+
+| Metric | Value |
+|---|---:|
+| Total Cases | 15 |
+| Doc Hit@1 | 0.73 |
+| Doc Hit@5 | 1.00 |
+| Section Hit@5 | 0.73 |
+| Avg Keyword Recall@5 | 0.78 |
+
+**解读**：普通 hybrid 检索能稳定命中目标论文，Top-5 文档命中率达到 1.00，适合开放式论文问答。
+
+### B. Section Eval A/B（limit=5）
+
+| Metric | Section Search | Hybrid Search |
+|---|---:|---:|
+| Section Precision@5 | 0.60 | 0.42 |
+| Doc Hit@5 | 0.60 | 1.00 |
+| Keyword Recall@5 | 0.47 | 0.83 |
+| Order OK Rate | 1.00 | 0.00 |
+
+**解读**：`section_search` 在目标章节命中率和原文顺序保持上更有优势，适合“只看 Abstract / Experiments / References”等章节级问题；`hybrid_search` 在全局关键词覆盖和目标论文命中方面更强，适合开放式全局问答。
+
+### C. Retrieval Loop Eval（max_cases=5）
+
+| Metric | Value |
+|---|---:|
+| Total Cases | 5 |
+| Doc Hit@K | 1.00 |
+| Avg Keyword Recall@K | 0.44 |
+| Rewrite Used Rate | 0.60 |
+| Avg Retrieval Attempts | 1.60 |
+| Avg Retrieval Confidence | 0.64 |
+
+**解读**：LangGraph 检索闭环能够触发 query rewrite；5 个挑战问题中 60% 使用了 rewrite，平均检索轮数为 1.60。
+
+运行命令：
+
+```bash
+docker compose exec api python evals/run_retrieval_eval.py --limit 5
+docker compose exec api python evals/run_section_eval.py --limit 5
+docker compose exec api python evals/run_retrieval_loop_eval.py --max-cases 5 --timeout-seconds 120 --verbose
+```
+
+结果文件：
+
+```text
+evals/results/retrieval_eval.md
+evals/results/section_eval.md
+evals/results/retrieval_loop_eval.md
+```
+
+---
+
+## 🧱 技术栈
+
+| 层级 | 技术 |
+|---|---|
+| 前端 | Streamlit |
+| 后端 | FastAPI, SSE |
+| Agent | LangChain, LangGraph, Pydantic AI |
+| 检索 | vector search, hybrid search, section_search |
+| 数据库 | PostgreSQL, pgvector |
+| PDF 解析 | Docling |
+| 模型接口 | OpenAI-compatible LLM / Embedding API |
+| 外部检索 | OpenAlex, General Web Search |
+| 部署 | Docker Compose |
 
 ---
 
@@ -71,8 +329,8 @@ flowchart LR
 ### 1. 克隆项目
 
 ```bash
-git clone <your-repo-url>
-cd agentic_rag_project-main2
+git clone https://github.com/zebir-sir/agentic-rag-paper-assistant.git
+cd agentic-rag-paper-assistant
 ```
 
 ### 2. 准备环境变量
@@ -89,7 +347,7 @@ Windows PowerShell：
 copy .env.example .env
 ```
 
-然后编辑 `.env`，至少配置 OpenAI-compatible 模型服务：
+至少配置 OpenAI-compatible 模型服务：
 
 ```env
 OPENAI_API_KEY=your_api_key
@@ -104,11 +362,13 @@ EMBEDDING_MODEL=text-embedding-3-small
 docker compose up -d
 ```
 
-常用访问地址：
+默认访问地址：
 
-- UI: `http://localhost:8502`
-- API: `http://localhost:8059`
-- API Docs: `http://localhost:8059/docs`
+| 服务 | 地址 |
+|---|---|
+| Streamlit UI | `http://localhost:8502` |
+| FastAPI Backend | `http://localhost:8059` |
+| API Docs | `http://localhost:8059/docs` |
 
 ### 4. 健康检查
 
@@ -116,7 +376,7 @@ docker compose up -d
 curl http://localhost:8059/health/live
 ```
 
-Windows PowerShell 推荐使用：
+Windows PowerShell：
 
 ```powershell
 curl.exe http://localhost:8059/health/live
@@ -126,7 +386,7 @@ curl.exe http://localhost:8059/health/live
 
 ## ⚙️ 环境变量
 
-### 必填：LLM / Embedding
+### LLM / Embedding
 
 ```env
 OPENAI_API_KEY=your_api_key
@@ -135,7 +395,7 @@ LLM_CHOICE=gpt-4o-mini
 EMBEDDING_MODEL=text-embedding-3-small
 ```
 
-### 数据库
+### PostgreSQL
 
 ```env
 DB_HOST=postgres
@@ -145,7 +405,7 @@ DB_PASSWORD=postgres
 DB_NAME=agentic_rag
 ```
 
-### 可选：OpenAlex 学术检索
+### OpenAlex 学术检索（可选）
 
 ```env
 OPENALEX_API_KEY=your_openalex_key
@@ -154,100 +414,95 @@ OPENALEX_MAILTO=
 
 未配置 `OPENALEX_API_KEY` 时，本地知识库问答仍可正常使用。
 
-### 可选：通用网页搜索
+### 通用网页搜索（可选）
 
 ```env
 GENERAL_WEB_SEARCH_ENABLED=false
 GENERAL_WEB_SEARCH_PROVIDER=bocha
-GENERAL_WEB_SEARCH_API_KEY=your_bocha_api_key
+GENERAL_WEB_SEARCH_API_KEY=your_api_key
 GENERAL_WEB_SEARCH_ENDPOINT=https://api.bochaai.com/v1/web-search
 ```
 
-说明：
+通用网页搜索默认关闭。配置 provider、endpoint 和 API key 后，可用于普通网页资料、技术解释、最新信息和非论文来源问题回答。
 
-- 通用网页搜索默认关闭，避免依赖付费 API 额度。
-- 配置有效 provider、API key 与可用额度后，可用于普通网页资料、技术解释与最新信息补充。
-- `.env` 仅用于本地运行，不应提交到 GitHub。
+> `.env` 只用于本地运行，不应提交到 GitHub。
 
 ---
 
 ## 📄 文档入库
 
-### 前端上传入库（推荐）
+### 前端上传入库
 
-1. 打开前端：`http://localhost:8502`
+1. 打开 `http://localhost:8502`
 2. 点击聊天输入框上方的 `📄 分析面板`
-3. 在“上传论文入库”中选择 PDF
+3. 选择 PDF 文件
 4. 点击“开始入库”
-5. 页面会显示后台任务进度条
-6. 如需中止，可点击“取消入库”
-7. 入库成功后，新论文会出现在分析面板的论文选择列表中
-
-说明：
-
-- 前端入库会创建后台任务，不需要手动进入容器执行命令。
-- 进度条为 **best-effort**，基于后端阶段和日志解析估算，不代表精确页级或 token 级进度。
-- 任务状态保存在 API 进程内存中，API 重启后进行中的任务状态会丢失。
-- 上传大小由 `DOCUMENT_UPLOAD_MAX_BYTES` 控制，默认 30MB。
+5. 等待进度条完成
+6. 入库成功后，可在论文选择列表中直接分析
 
 ### 命令行批量入库
 
-批量导入多篇论文时，可以使用命令行方式：
+快速模式：
 
 ```bash
-docker compose exec api python -m ingestion.ingest --documents documents --fast -v
+docker compose exec api python -m ingestion.ingest --documents documents --fast --verbose
 ```
 
-如果需要更完整的图片、表格或语义解析，可根据 ingestion 参数关闭快速模式。
+修改 chunking 逻辑后，可以重建论文库，只清理 `documents/chunks`，不删除会话和消息：
+
+```bash
+docker compose exec -e ALLOW_KB_RESET=true api python -m ingestion.ingest --documents documents --reset-kb --fast --verbose
+```
+
+完整模式会保留更多 Docling 解析能力，但耗时更长：
+
+```bash
+docker compose exec -e ALLOW_KB_RESET=true api python -m ingestion.ingest --documents documents --reset-kb --verbose
+```
+
+> 日常重建论文库请使用 `--reset-kb`，不要使用 `--clean`。`--clean` 会清理会话、消息、文档和 chunks。
 
 ---
 
-## 💬 前端使用
+## 💬 使用示例
 
-### 侧栏
+### 论文知识库问答
 
-- 配置 API 地址
-- 检查服务状态
-- 新建对话
-- 刷新会话列表
-- 清空当前对话
-- 恢复历史会话
+```text
+总结 Hybrid-RRT 这篇论文的方法流程，并说明依据来自哪些章节。
+```
 
-### 输入框上方工具栏
+```text
+只检索 Hybrid-RRT 的 Abstract 章节，总结核心贡献。
+```
 
-- `📄 分析面板`：上传论文、选择论文、单篇分析、多篇对比
-- `🛠 工具`：切换 OpenAlex、通用网页搜索、深度分析与检索方式
-- `■ 停止`：流式输出时停止继续接收，保留当前已生成内容
+```text
+对比 HA-RRT、HMA-RRT 和 Hybrid-RRT 的核心方法差异，优先基于知识库证据回答。
+```
 
-### 证据展示
+### 学术检索与 related work
 
-回答下方会显示“依据片段”，并按来源分组：
+```text
+查找 USV 路径规划方向 related work，并给出作者、年份、DOI。
+```
 
-- 本地知识库
-- 联网搜索 / OpenAlex 来源
+```text
+帮我找几篇关于 RRT* 改进算法的开放获取论文，并说明来源。
+```
 
----
+### 通用网页搜索与技术解释
 
-## 🔍 深度分析模式
+```text
+联网查一下 RRT* 和 Informed RRT* 的区别，并给出网页来源。
+```
 
-深度分析模式不是简单拉长 prompt，而是使用 LangGraph 将论文分析拆成可控流程：
+```text
+解释 APF-RRT* 是什么，和普通 RRT* 有什么关系？
+```
 
-1. 检查知识库文档
-2. 本地检索相关片段
-3. 生成分析草稿
-4. 进行轻量证据检查
-5. 整理最终回答
-
-该模式适合：
-
-- 论文总结
-- 方法流程拆解
-- 实验解读
-- 创新点分析
-- 局限性分析
-- 多篇论文对比
-
-如果证据不足，系统会尽量明确说明不确定性，避免无依据扩展。
+```text
+这个算法里的 exploration 和 exploitation 在采样规划中分别指什么？
+```
 
 ---
 
@@ -260,14 +515,14 @@ docker compose exec api python -m ingestion.ingest --documents documents --fast 
 | `POST /chat` | 普通问答 |
 | `POST /chat/stream` | SSE 流式问答 |
 | `GET /documents` | 文档列表 |
-| `POST /documents/upload` | 同步 PDF 入库接口（兼容保留） |
+| `POST /documents/upload` | 同步 PDF 入库接口 |
 | `POST /documents/upload/start` | 创建异步 PDF 入库任务 |
 | `GET /documents/upload/jobs/{job_id}` | 查询入库任务状态 |
 | `POST /documents/upload/jobs/{job_id}/cancel` | 取消入库任务 |
 | `GET /sessions` | 会话列表 |
 | `GET /sessions/{session_id}/messages` | 会话消息 |
 | `GET /openalex/status` | OpenAlex 可用状态 |
-| `POST /openalex/add-to-kb` | 将 OpenAlex 来源加入知识库 |
+| `POST /openalex/add-to-kb` | 将 OpenAlex 论文来源加入知识库 |
 | `GET /web-search/status` | 通用网页搜索状态 |
 
 ---
@@ -275,25 +530,48 @@ docker compose exec api python -m ingestion.ingest --documents documents --fast 
 ## 📁 项目结构
 
 ```text
-agent/                 Agent、API、工具调用、会话与入库任务
-ingestion/             PDF 解析、分块、embedding、入库
-ui/                    Streamlit 前端
-common/                前后端共享展示工具
-sql/                   PostgreSQL / pgvector 初始化脚本
-tests/                 单元测试
-dev_checks/            开发阶段检查脚本
-documents/             本地文档目录（默认不提交真实 PDF）
-docker-compose.yml     容器编排
+agent/
+  api.py                 FastAPI 路由、聊天执行、流式输出
+  agent.py               Pydantic AI Agent 工具注册
+  agent_langchain.py     LangChain Agent 执行与流式处理
+  agent_langgraph.py     LangGraph 深度分析工作流
+  db_utils.py            PostgreSQL / pgvector 数据访问
+  tools.py               检索、OpenAlex、Web Search 工具
+  tool_payloads.py       工具结果转 payload 与 evidence 收集
+  routing.py             问题类型识别与输出格式约束
+
+ingestion/
+  extract_files.py       Docling PDF 解析
+  chunker.py             Section-aware chunking
+  ingest.py              embedding 与 PostgreSQL 入库
+
+ui/
+  app.py                 Streamlit 主界面
+  api_client.py          后端 API 与 SSE 客户端
+  components.py          来源展示、分析面板、UI 组件
+  prompt_templates.py    论文分析模板
+
+evals/
+  run_retrieval_eval.py       普通检索评测
+  run_section_eval.py         章节检索 A/B 评测
+  run_retrieval_loop_eval.py  多轮检索闭环评测
+  results/                    评测报告输出
+
+common/                  前后端共享展示工具
+sql/                     PostgreSQL / pgvector 初始化脚本
+tests/                   测试文件
+documents/               本地论文目录，默认不提交真实 PDF
 ```
 
 ---
 
 ## 🧪 开发检查
 
-基础语法检查：
+语法检查：
 
 ```bash
 python -m py_compile agent/*.py ui/*.py common/*.py ingestion/*.py
+python -m py_compile evals/run_retrieval_eval.py evals/run_section_eval.py evals/run_retrieval_loop_eval.py
 ```
 
 运行测试：
@@ -302,7 +580,15 @@ python -m py_compile agent/*.py ui/*.py common/*.py ingestion/*.py
 pytest
 ```
 
-部分集成测试可能依赖 `.env` 中的数据库、模型服务或外部检索配置。
+运行评测：
+
+```bash
+docker compose exec api python evals/run_retrieval_eval.py --limit 5
+docker compose exec api python evals/run_section_eval.py --limit 5
+docker compose exec api python evals/run_retrieval_loop_eval.py --max-cases 5 --timeout-seconds 120 --verbose
+```
+
+> 部分集成测试和评测依赖 PostgreSQL、模型服务、embedding 配置或外部检索配置。
 
 ---
 
@@ -310,32 +596,45 @@ pytest
 
 - 不要提交 `.env`、真实 API key 或数据库密码。
 - 不建议将 `documents/` 下的真实论文 PDF 提交到公开仓库。
-- 通用网页搜索依赖第三方 provider 和 API 额度，默认关闭。
-- PDF 入库进度为阶段估算，不是精确页级/token 级进度。
-- 入库任务状态保存在 API 进程内存中，API 重启后进行中的任务状态会丢失。
-- 跨领域效果依赖文档解析质量、知识库质量和检索命中率。
-- 当前项目更适合本地或私有化部署，不建议在无鉴权情况下直接公网开放。
+- 通用网页搜索依赖第三方 provider 和 API key，默认关闭。
+- OpenAlex 主要提供论文元数据、摘要线索和开放获取链接，不等同于本地论文全文证据。
+- Web Search 结果是网页来源证据，不应与本地论文原文证据混淆。
+- 入库任务状态目前保存在 API 进程内存中，服务重启后进行中的任务状态会丢失。
+- PDF 章节识别质量依赖 Docling 输出；复杂排版可能影响 section metadata。
+- `section_search` 是基于 chunk metadata 的章节过滤检索，不等于完整文档结构解析系统。
+- 当前项目适合本地或私有化部署，不建议在无鉴权情况下直接公网开放。
 
 ---
 
 ## 🗺️ 后续规划
 
-- 拆分后端 API，将 chat、documents、sessions、health 等路由迁移到 routes/services 模块
-- 增加检索评测集，对比 vector 与 hybrid 检索效果
-- 增强来源定位粒度，例如页码、章节、段落
-- 支持更稳定的任务队列，例如 Redis/Celery
-- 可选增加用户认证与多用户数据隔离
+- 页码级 evidence 定位
+- 扩展更大的检索评测集和更多文档集验证
+- 入库任务迁移到 Redis / Celery 等持久任务队列
+- 后端 routes / services 模块拆分
+- 用户认证与多用户数据隔离
+- 更细粒度的章节树展示与文档结构恢复
 
-## 致谢
+---
+
+## 🙏 致谢
 
 本项目的初始项目结构参考了开源项目 [serkanyasr/agentic_rag_project](https://github.com/serkanyasr/agentic_rag_project)，该项目基于 MIT License 发布。
 
-在此基础上，本项目已围绕科研论文阅读场景进行了较大幅度的重构与扩展，包括 LangChain / LangGraph Agent 工作流、会话历史与长对话摘要压缩、OpenAlex 学术检索、可选通用网页搜索、前端 PDF 上传入库、入库进度与取消任务、证据来源展示等功能。
+在此基础上，本项目围绕科研论文阅读和可追溯问答场景进行了重构与扩展，包括：
+
+- LangChain / LangGraph Agent 工作流
+- 会话历史与长对话摘要压缩
+- OpenAlex 学术检索与可选通用网页搜索
+- 前端 PDF 上传入库、进度展示与取消任务
+- section-aware chunking 与章节级检索
+- evidence source 展示与章节级证据追踪
+- 轻量检索评测与章节检索 A/B 验证
 
 原项目的 MIT License 与版权声明已保留。
+
 ---
 
-## License
+## 📜 License
 
 MIT License
-

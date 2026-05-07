@@ -1,0 +1,65 @@
+[
+  {
+    "id": "loop_001",
+    "query": "这篇混合采样的RRT论文主要怎么平衡探索和利用？",
+    "expected_document_keywords": ["Hybrid-RRT"],
+    "expected_content_keywords": ["hybrid sampling", "uniform", "non-uniform", "exploration", "exploitation"],
+    "notes": "模糊中文问题，应通过检索闭环命中 Hybrid-RRT 的 hybrid sampling 相关片段"
+  },
+  {
+    "id": "loop_002",
+    "query": "请解释 HMA-RRT 在动态环境下如何做自适应策略切换。",
+    "expected_document_keywords": ["HMA-RRT"],
+    "expected_content_keywords": ["adaptive", "dynamic environment", "strategy", "heuristic"],
+    "notes": "中文提问，目标是英文术语片段"
+  },
+  {
+    "id": "loop_003",
+    "query": "HA-RRT 的启发式机制具体影响了哪些路径规划行为？",
+    "expected_document_keywords": ["HA-RRT"],
+    "expected_content_keywords": ["heuristic", "sampling", "path planning", "convergence"],
+    "notes": "方法机制问题，通常分散在方法与实验章节"
+  },
+  {
+    "id": "loop_004",
+    "query": "对比 HA-RRT、HMA-RRT、Hybrid-RRT 在研究问题上的差异。",
+    "expected_document_keywords": ["HA-RRT", "HMA-RRT", "Hybrid-RRT"],
+    "expected_content_keywords": ["research", "method", "path planning", "comparison"],
+    "notes": "多论文对比，可能需要 rewrite 才能覆盖更多论文片段"
+  },
+  {
+    "id": "loop_005",
+    "query": "哪篇论文更强调船舶或USV场景，依据是什么？",
+    "expected_document_keywords": ["HA-RRT", "HMA-RRT", "Hybrid-RRT"],
+    "expected_content_keywords": ["USV", "ship", "vessel", "marine", "path planning"],
+    "notes": "场景归纳问题，目标关键词为船舶/USV相关术语"
+  },
+  {
+    "id": "loop_006",
+    "query": "这几篇 RRT 论文在实验设计上有什么不同，尤其是评估指标和对比基线？",
+    "expected_document_keywords": ["HA-RRT", "HMA-RRT", "Hybrid-RRT"],
+    "expected_content_keywords": ["experiments", "evaluation", "baseline", "metrics"],
+    "notes": "跨章节问题（实验设置+结果），适合验证多轮检索价值"
+  },
+  {
+    "id": "loop_007",
+    "query": "Hybrid-RRT 有没有提到失败场景或局限性？",
+    "expected_document_keywords": ["Hybrid-RRT"],
+    "expected_content_keywords": ["limitation", "failure", "constraint", "future work"],
+    "notes": "结论/讨论相关，初检索可能不足，需要改写"
+  },
+  {
+    "id": "loop_008",
+    "query": "如果只看方法层面，HMA-RRT 和 Hybrid-RRT 的核心差别是什么？",
+    "expected_document_keywords": ["HMA-RRT", "Hybrid-RRT"],
+    "expected_content_keywords": ["method", "adaptive", "hybrid sampling", "algorithm"],
+    "notes": "方法对比，验证闭环后关键词覆盖度提升"
+  },
+  {
+    "id": "loop_009",
+    "query": "这些论文如何权衡全局探索与局部优化？",
+    "expected_document_keywords": ["HA-RRT", "HMA-RRT", "Hybrid-RRT"],
+    "expected_content_keywords": ["global", "local", "exploration", "exploitation", "optimization"],
+    "notes": "抽象描述问题，通常需要 rewrite 将语义落地到具体术语"
+  }
+]

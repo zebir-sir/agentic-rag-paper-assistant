@@ -6,11 +6,13 @@ from .tools import (
     DocumentListInput,
     HybridSearchInput,
     OpenAlexSearchInput,
+    SectionSearchInput,
     VectorSearchInput,
     get_document_tool,
     hybrid_search_tool,
     list_documents_tool,
     openalex_search_tool,
+    section_search_tool,
     vector_search_tool,
 )
 
@@ -147,3 +149,27 @@ async def run_openalex_payload(deps: AgentDependencies, query: str, limit: int) 
         )
         payload.append(item)
     return payload
+
+
+async def run_section_search_payload(
+    deps: AgentDependencies,
+    query: str,
+    section_query: str,
+    limit: int,
+    document_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    try:
+        results = await section_search_tool(
+            SectionSearchInput(
+                query=query,
+                section_query=section_query,
+                limit=limit,
+                document_id=document_id,
+            )
+        )
+        payload = [chunk_result_to_payload(r) for r in results]
+        collect_hits(deps, payload)
+        return payload
+    except Exception as exc:
+        _mark_retrieval_error(deps, f"section_search_failed:{type(exc).__name__}")
+        return []

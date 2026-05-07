@@ -87,7 +87,7 @@ def _build_regeneration_prompt(full_prompt: str) -> str:
         "算法名如 `RRT*` 用反引号保护；"
         "如果原问题是本地论文/知识库问题，请优先使用已有本地检索上下文和本地知识库工具；"
         "不要要求联网搜索作为默认手段；"
-        "如果缺少某篇论文证据，只说明“当前检索片段不足”；"
+        "如果某个具体点缺少论文证据，在对应结论处简短说明边界；不要让整篇回答被证据不足声明主导；"
         "不要输出伪造链接、工具名、tool call 占位符或 `search_web(...)` 这类字符串。"
     )
     return f"{full_prompt}\n\n[生成修复指令]\n{repair_instruction}"

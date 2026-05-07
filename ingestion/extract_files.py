@@ -47,7 +47,8 @@ class PDFExtractor:
                 }
             )
         except Exception as e:
-            logging.error(f"Failed to initialize docling: {e}")
+            logger.exception("Failed to initialize docling")
+            raise RuntimeError(f"Docling 初始化失败: {e}") from e
 
     def extract_pdf_content(self, pdf_path: str) -> Tuple[str, Dict[str, Any]]:
         """从单个 PDF 文件中提取内容。"""
