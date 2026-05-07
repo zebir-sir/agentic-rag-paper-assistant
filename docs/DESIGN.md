@@ -50,12 +50,15 @@
 - 两者适用场景不同：章节定位 vs 全局覆盖
 - 该 eval 是轻量项目评测，不是大规模 benchmark
 
-## 7. Current Limitations
-- PDF 解析依赖 Docling，复杂排版可能影响章节识别
-- 入库任务状态当前在进程内存中，服务重启会丢失
-- Web Search 依赖第三方 provider/API key
-- OpenAlex 主要提供元数据，不等于全文论文证据
-- 当前未做多用户鉴权和数据隔离
+## 7. Current Limitations & Mitigations
+
+| Limitation | Impact | Mitigation / Future Work |
+|---|---|---|
+| PDF parsing depends on Docling output quality | Complex multi-column layouts, formulas or scanned PDFs may affect section detection and chunk quality. | Add page-level evidence mapping and consider LayoutParser / OCR fallback for difficult PDFs. |
+| Deep analysis has timeout protection | Very broad multi-paper questions may timeout before completing all retrieval / rewrite / evidence-check steps. | Add dynamic retry budgeting and guide users to narrow scope by paper, section or question type. |
+| Ingestion job state is stored in API process memory | Running ingestion jobs may lose state after service restart. | Move ingestion jobs to Redis / Celery or another persistent task queue. |
+| Section search relies on section metadata | If the PDF lacks clear headings, section-level retrieval falls back to normal chunk retrieval quality. | Improve heading normalization and add manual section correction / page-level fallback. |
+| General Web Search depends on external provider configuration | If API key/provider is not configured, web search is unavailable. | Expose tool availability in UI and fall back to local KB / OpenAlex when appropriate. |
 
 ## 8. Future Work
 - page-level evidence（页级证据定位）

@@ -605,6 +605,7 @@ docker compose exec api python evals/run_retrieval_loop_eval.py --max-cases 5 --
 - PDF 章节识别质量依赖 Docling 输出；复杂排版可能影响 section metadata。
 - `section_search` 是基于 chunk metadata 的章节过滤检索，不等于完整文档结构解析系统。
 - 当前项目适合本地或私有化部署，不建议在无鉴权情况下直接公网开放。
+更多工程边界、失败场景与改进方向见 [Design Notes](docs/DESIGN.md#7-current-limitations--mitigations)。
 
 ---
 
