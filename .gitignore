@@ -38,3 +38,5 @@ Thumbs.db
 # local virtualenv / temp
 .venv/
 .tmp/
+
+test_logs/

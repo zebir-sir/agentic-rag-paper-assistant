@@ -8,6 +8,7 @@ from .tool_payloads import (
     collect_hits,
     run_get_document_payload,
     run_hybrid_search_payload,
+    run_artifact_search_payload,
     run_list_documents_payload,
     run_openalex_payload,
     run_section_search_payload,
@@ -40,6 +41,14 @@ class SectionSearchArgs(BaseModel):
     section_query: str
     document_id: Optional[str] = None
     limit: int = Field(default=10, ge=1, le=50)
+
+
+class ArtifactSearchArgs(BaseModel):
+    query: str
+    limit: int = Field(default=10, ge=1, le=50)
+    artifact_types: Optional[List[str]] = None
+    document_id: Optional[str] = None
+    text_weight: float = Field(default=0.3, ge=0.0, le=1.0)
 
 
 class DocumentArgs(BaseModel):
@@ -100,6 +109,22 @@ def build_langchain_tools(deps: AgentDependencies) -> list:
             section_query=section_query,
             document_id=document_id,
             limit=limit,
+        )
+
+    async def artifact_search_async(
+        query: str,
+        limit: int = 10,
+        artifact_types: Optional[List[str]] = None,
+        document_id: Optional[str] = None,
+        text_weight: float = 0.3,
+    ) -> List[Dict[str, Any]]:
+        return await run_artifact_search_payload(
+            deps=deps,
+            query=query,
+            limit=limit,
+            artifact_types=artifact_types,
+            document_id=document_id,
+            text_weight=text_weight,
         )
 
     async def get_document_async(document_id: str) -> Optional[Dict[str, Any]]:
@@ -167,6 +192,18 @@ def build_langchain_tools(deps: AgentDependencies) -> list:
                 "References/Abstract/Conclusion or a specific section."
             ),
             args_schema=SectionSearchArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=artifact_search_async,
+            name="artifact_search",
+            description=(
+                "Search local artifact chunks extracted from uploaded papers, including tables, figures, "
+                "and algorithms/pseudocode. Use as supplementary local evidence when non-prose artifacts "
+                "are needed or prose evidence references artifacts but lacks their details. This tool "
+                "complements, not replaces, general local knowledge search. Keep retrieval minimal with "
+                "small limit and optional artifact_types/document_id filters."
+            ),
+            args_schema=ArtifactSearchArgs,
         ),
         StructuredTool.from_function(
             coroutine=vector_search_async,

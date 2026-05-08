@@ -37,7 +37,16 @@
 - vector search：更偏语义召回
 - hybrid search：兼顾语义与关键词
 - section_search：适合“只看 Abstract / Experiments / References”等章节限定问题
+- artifact_search：补充表格、图、算法/伪代码等非正文证据（table/figure/algorithm）
 - OpenAlex / Web Search：用于本地语料之外的外部扩展检索
+
+### Capability-aware Intent Planner
+
+- Planner 负责“是否检索、检索什么、检索多少”的轻量规划，不生成最终答案。
+- Planner 只在可用工具集合内规划（capability-aware）：不可用工具会在 normalize/runtime 两层被过滤。
+- 每轮最多 2 个检索步骤，优先最小必要检索。
+- 如果外部工具未启用，Planner 不会执行 OpenAlex/Web；系统会回退到可用本地检索或直答。
+- 该机制是通用决策框架，不依赖特定论文、图号、表号或算法名规则。
 
 ## 6. Evaluation
 当前轻量评测结果（真实运行结果）：

@@ -115,6 +115,7 @@ SOURCE_SELECTION_POLICY = """
 Source selection policy:
 - Use local knowledge base when the user asks about uploaded papers, selected documents, paper summaries, methods, experiments, limitations, or evidence from the local corpus.
 - Use section_search when the user asks for a specific section such as Abstract, Method, Experiments, Results, Conclusion, References, or asks to only inspect a section.
+- Use artifact_search for supplementary local artifact evidence (tables, figures, algorithms) when non-prose details are needed; keep retrieval minimal and prefer narrow filters when possible.
 - Use OpenAlex when the user asks to discover papers outside the local corpus, related work, literature search, authors, publication years, DOI, venue, citation metadata, open access links, or academic paper recommendations.
 - Use general web search when the user asks about open-web information, recent information, technical explanations, non-paper web sources, daily/open-domain questions, or asks for web sources.
 - If a source/tool is unavailable or disabled, explicitly say so and then fall back to available sources.

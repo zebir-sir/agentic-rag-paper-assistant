@@ -95,6 +95,7 @@ from .memory_utils import (
     get_messages_for_next_compaction,
     build_summary_update_prompt,
     build_context_without_compaction,
+    sanitize_history_messages,
 )
 from .ingestion_jobs import (
     add_openalex_file_to_kb,
@@ -117,6 +118,14 @@ LLM_FIRST_TOKEN_TIMEOUT_SECONDS = float(os.getenv("LLM_FIRST_TOKEN_TIMEOUT_SECON
 LLM_STREAM_TOTAL_TIMEOUT_SECONDS = float(os.getenv("LLM_STREAM_TOTAL_TIMEOUT_SECONDS", "75"))
 LANGGRAPH_ANALYSIS_TIMEOUT_SECONDS = float(os.getenv("LANGGRAPH_ANALYSIS_TIMEOUT_SECONDS", "90"))
 NON_STREAM_FALLBACK_TIMEOUT_SECONDS = float(os.getenv("NON_STREAM_FALLBACK_TIMEOUT_SECONDS", "35"))
+
+
+def clean_legacy_warning_text(text: str) -> str:
+    value = str(text or "")
+    return value.replace(
+        "当前没有检索到直接相关片段，以下内容更适合作为一般性分析参考。",
+        "本轮没有可核对的检索片段；未被检索证据支持的结论请谨慎参考。",
+    )
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL.upper()),
@@ -344,7 +353,7 @@ async def get_conversation_context(
     max_messages: Optional[int] = None,
 ) -> List[Dict[str, str]]:
     messages = await get_session_messages(session_id, limit=max_messages)
-    return [{"role": msg["role"], "content": msg["content"]} for msg in messages]
+    return sanitize_history_messages(messages)
 
 
 async def _summarize_for_memory(
@@ -586,6 +595,9 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
     requested_search_type = _resolve_search_type(request.search_type)
     explicit_web_request = _should_force_openalex(request.message)
     effective_use_web_search = bool(bool(request.use_web_search) or explicit_web_request)
+    request_metadata = request.metadata or {}
+    allow_web_search = bool(request_metadata.get("allow_web_search", bool(request.use_web_search)))
+    allow_openalex_search = bool(request_metadata.get("allow_openalex_search", True))
     deps = AgentDependencies(
         session_id=request.session_id or "",
         user_id=request.user_id,
@@ -593,6 +605,8 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
         search_preferences={
             "default_search_type": requested_search_type,
             "default_limit": 10,
+            "allow_web_search": allow_web_search,
+            "allow_openalex_search": allow_openalex_search,
         },
     )
     context_payload = await _prepare_agent_prompt(
@@ -723,7 +737,10 @@ async def execute_prepared_chat_runtime(
             requested_web=runtime.effective_use_web_search,
             sources=sources,
         )
-        response = clean_markdown_spacing(response)
+        response = clean_legacy_warning_text(
+            clean_markdown_spacing(response),
+            drop_warning=bool(workflow_metadata.get("retrieval_skipped_by_planner") and workflow_metadata.get("direct_answer_allowed")),
+        )
         sources_dict = [source.model_dump() for source in sources]
 
         safe_workflow_metadata = {
@@ -1094,17 +1111,18 @@ async def chat_stream(request: ChatRequest):
                     yield sse_event("end")
                     return
 
-                if is_local_question:
-                    yield sse_event("status", content="Searching local knowledge base...")
-                elif explicit_general_web_request:
-                    yield sse_event("status", content="Checking whether web search is needed...")
-                else:
-                    yield sse_event("status", content="Analyzing the question and generating an answer...")
+                yield sse_event(
+                    "status",
+                    content="正在规划回答...",
+                    phase="planning",
+                    user_visible=True,
+                    level="info",
+                )
                 if use_react and get_agent_backend() == "langchain":
-                    progress_queue: asyncio.Queue[str] = asyncio.Queue()
+                    progress_queue: asyncio.Queue[Any] = asyncio.Queue()
 
-                    async def progress_callback(msg: str) -> None:
-                        await progress_queue.put(str(msg))
+                    async def progress_callback(msg: Any) -> None:
+                        await progress_queue.put(msg)
 
                     graph_task = asyncio.create_task(
                         run_langgraph_analysis(
@@ -1123,20 +1141,54 @@ async def chat_stream(request: ChatRequest):
                             return
                         try:
                             msg = await asyncio.wait_for(progress_queue.get(), timeout=0.2)
-                            if msg:
-                                yield sse_event("status", content=msg)
+                            if not msg:
+                                continue
+                            if isinstance(msg, dict):
+                                payload = {
+                                    "content": str(msg.get("content") or ""),
+                                    "phase": str(msg.get("phase") or "internal"),
+                                    "user_visible": bool(msg.get("user_visible", True)),
+                                    "level": str(msg.get("level") or "info"),
+                                }
+                            else:
+                                payload = {
+                                    "content": str(msg),
+                                    "phase": "internal",
+                                    "user_visible": False,
+                                    "level": "debug",
+                                }
+                            yield sse_event("status", **payload)
                         except asyncio.TimeoutError:
                             continue
                     graph_result = await graph_task
                     while not progress_queue.empty():
                         msg = await progress_queue.get()
-                        if msg:
-                            yield sse_event("status", content=msg)
+                        if not msg:
+                            continue
+                        if isinstance(msg, dict):
+                            payload = {
+                                "content": str(msg.get("content") or ""),
+                                "phase": str(msg.get("phase") or "internal"),
+                                "user_visible": bool(msg.get("user_visible", True)),
+                                "level": str(msg.get("level") or "info"),
+                            }
+                        else:
+                            payload = {
+                                "content": str(msg),
+                                "phase": "internal",
+                                "user_visible": False,
+                                "level": "debug",
+                            }
+                        yield sse_event("status", **payload)
                     full_response = str(getattr(graph_result, "message", "") or "")
                     tools_used = list(getattr(graph_result, "tools_used", []) or [])
                     sources = list(getattr(graph_result, "sources", []) or [])
                     workflow_metadata = dict(getattr(graph_result, "metadata", {}) or {})
                     response_backend = "langgraph"
+                    full_response = clean_legacy_warning_text(
+                        full_response,
+                        drop_warning=bool(workflow_metadata.get("retrieval_skipped_by_planner") and workflow_metadata.get("direct_answer_allowed")),
+                    )
                     if full_response:
                         yield sse_event("text", content=full_response)
                     stream_backend = "langgraph"
@@ -1287,7 +1339,10 @@ async def chat_stream(request: ChatRequest):
                         sources=sources,
                     )
                 # Lightweight markdown post-processing
-                full_response = clean_markdown_spacing(full_response)
+                full_response = clean_legacy_warning_text(
+                    clean_markdown_spacing(full_response),
+                    drop_warning=bool(workflow_metadata.get("retrieval_skipped_by_planner") and workflow_metadata.get("direct_answer_allowed")),
+                )
                 sources_data = [source.model_dump() for source in sources]
                 safe_workflow_metadata = {
                     k: v
@@ -1513,10 +1568,4 @@ if __name__ == "__main__":
         reload=APP_ENV == "development",
         log_level=LOG_LEVEL.lower(),
     )
-
-
-
-
-
-
 

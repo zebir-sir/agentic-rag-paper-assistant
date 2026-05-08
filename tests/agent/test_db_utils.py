@@ -17,6 +17,7 @@ from agent.db_utils import (
     list_documents,
     vector_search,
     hybrid_search,
+    artifact_search,
     get_document_chunks,
     test_connection as db_test_connection
 )
@@ -112,7 +113,15 @@ class TestSessionManagement:
             call_args = mock_conn.fetchrow.call_args
             assert "INSERT INTO sessions" in call_args[0][0]
             assert call_args[0][1] == "user-123"  # user_id 字段
-            assert json.loads(call_args[0][2]) == {"client": "web"}  # metadata 字段
+            metadata = json.loads(call_args[0][2])
+            assert metadata["client"] == "web"
+            assert metadata["title"] == "New Chat"
+            assert metadata["title_generated"] is False
+            assert metadata["latest_summary"] == ""
+            assert metadata["compression_count"] == 0
+            assert metadata["compacted_message_count"] == 0
+            assert metadata["last_message_at"] is None
+            assert metadata["summary_updated_at"] is None
     
     @pytest.mark.asyncio
     async def test_get_session_exists(self):
@@ -407,3 +416,93 @@ class TestUtilityFunctions:
             result = await db_test_connection()
             
             assert result is False
+
+
+class TestArtifactSearch:
+    @pytest.mark.asyncio
+    async def test_artifact_search_includes_artifact_filter(self):
+        with patch("agent.db_utils.db_pool") as mock_pool:
+            mock_conn = AsyncMock()
+            mock_conn.fetch.return_value = []
+            mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+            mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            await artifact_search(embedding=[0.1] * 8, query_text="performance", limit=5)
+
+            call_args = mock_conn.fetch.call_args
+            sql = call_args[0][0]
+            assert "content_type" in sql
+            assert "'artifact'" in sql
+
+    @pytest.mark.asyncio
+    async def test_artifact_search_filters_artifact_type(self):
+        with patch("agent.db_utils.db_pool") as mock_pool:
+            mock_conn = AsyncMock()
+            mock_conn.fetch.return_value = []
+            mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+            mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            await artifact_search(
+                embedding=[0.1] * 8,
+                query_text="table summary",
+                artifact_types=["table"],
+                limit=5,
+            )
+
+            call_args = mock_conn.fetch.call_args
+            sql = call_args[0][0]
+            params = call_args[0][1:]
+            assert "artifact_type" in sql
+            assert any(isinstance(p, list) and p == ["table"] for p in params)
+
+    @pytest.mark.asyncio
+    async def test_artifact_search_filters_document_id(self):
+        with patch("agent.db_utils.db_pool") as mock_pool:
+            mock_conn = AsyncMock()
+            mock_conn.fetch.return_value = []
+            mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+            mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            await artifact_search(
+                embedding=[0.1] * 8,
+                query_text="algorithm",
+                document_id="11111111-1111-1111-1111-111111111111",
+                limit=5,
+            )
+
+            call_args = mock_conn.fetch.call_args
+            sql = call_args[0][0]
+            params = call_args[0][1:]
+            assert "d.id = $" in sql
+            assert "11111111-1111-1111-1111-111111111111" in params
+
+    @pytest.mark.asyncio
+    async def test_artifact_search_returns_expected_fields(self):
+        with patch("agent.db_utils.db_pool") as mock_pool:
+            mock_conn = AsyncMock()
+            mock_conn.fetch.return_value = [
+                {
+                    "chunk_id": "chunk-a",
+                    "document_id": "doc-a",
+                    "content": "artifact content",
+                    "combined_score": 0.9,
+                    "vector_similarity": 0.8,
+                    "text_similarity": 0.7,
+                    "metadata": '{"artifact_type":"table"}',
+                    "document_title": "Doc A",
+                    "document_source": "doc-a.md",
+                }
+            ]
+            mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+            mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            rows = await artifact_search(embedding=[0.1] * 8, query_text="table", limit=5)
+            assert len(rows) == 1
+            row = rows[0]
+            assert row["chunk_id"] == "chunk-a"
+            assert row["document_id"] == "doc-a"
+            assert row["content"] == "artifact content"
+            assert row["metadata"]["artifact_type"] == "table"
+            assert row["document_title"] == "Doc A"
+            assert row["document_source"] == "doc-a.md"
+            assert "combined_score" in row

@@ -8,10 +8,18 @@ from langgraph.graph import END, START, StateGraph
 
 from .agent_langchain import get_langchain_chat_model
 from .agent_runtime import AgentDependencies
+from .intent_planner import (
+    IntentPlan,
+    PlannerCapabilities,
+    build_fallback_intent_plan,
+    plan_user_intent_debug,
+)
 from .langchain_tools import build_langchain_tools
 from .models import EvidenceSource, ToolCall
+from .planner_runtime import execute_intent_plan_steps, summarize_hits_for_planner
 from .prompts import SYSTEM_PROMPT
-from .tools import DocumentListInput, list_documents_tool
+from .tools import DocumentListInput, is_general_web_search_enabled, list_documents_tool
+from .openalex_router import _is_openalex_enabled
 
 
 class LangGraphAnalysisState(TypedDict, total=False):
@@ -95,6 +103,129 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
+
+
+def _build_planner_capabilities(deps: Optional[AgentDependencies] = None) -> PlannerCapabilities:
+    search_preferences = (deps.search_preferences or {}) if deps is not None else {}
+    user_allow_web = bool(
+        search_preferences.get(
+            "allow_web_search",
+            bool(getattr(deps, "use_web_search", False)),
+        )
+    )
+    user_allow_openalex = bool(search_preferences.get("allow_openalex_search", True))
+    provider_openalex = bool(_is_openalex_enabled())
+    provider_web = bool(is_general_web_search_enabled())
+
+    return PlannerCapabilities(
+        local_search_enabled=True,
+        vector_search_enabled=True,
+        hybrid_search_enabled=True,
+        section_search_enabled=True,
+        artifact_search_enabled=True,
+        openalex_search_enabled=bool(user_allow_openalex and provider_openalex),
+        web_search_enabled=bool(user_allow_web and provider_web),
+        direct_answer_enabled=True,
+        max_tools=2,
+    )
+
+
+def clean_legacy_warning_text(text: str) -> str:
+    value = str(text or "")
+    return value.replace(
+        "当前没有检索到直接相关片段，以下内容更适合作为一般性分析参考。",
+        "本轮没有可核对的检索片段；未被检索证据支持的结论请谨慎参考。",
+    ).replace(
+        "以下内容更适合作为一般性分析参考。",
+        "未被检索证据支持的结论请谨慎参考。",
+    )
+
+
+def _build_runtime_decision_summary(metadata: Dict[str, Any]) -> str:
+    metadata = dict(metadata or {})
+    planner_decision = metadata.get("planner_decision") or {}
+    if not isinstance(planner_decision, dict):
+        planner_decision = {}
+
+    lines: List[str] = []
+    if planner_decision:
+        lines.append(f"- intent: {planner_decision.get('intent')}")
+        lines.append(f"- needs_retrieval: {planner_decision.get('needs_retrieval')}")
+        lines.append(f"- direct_answer_allowed: {planner_decision.get('direct_answer_allowed')}")
+        lines.append(f"- allow_external_sources: {planner_decision.get('allow_external_sources')}")
+        lines.append(f"- planned_tools: {planner_decision.get('planned_tools')}")
+        lines.append(f"- evidence_policy: {planner_decision.get('evidence_policy')}")
+        lines.append(f"- reason: {planner_decision.get('reason')}")
+    else:
+        lines.append("- planner_decision: unavailable")
+
+    lines.append(f"- retrieval_skipped_by_planner: {metadata.get('retrieval_skipped_by_planner')}")
+    lines.append(f"- retrieval_skip_reason: {metadata.get('retrieval_skip_reason')}")
+    lines.append(f"- retrieval_sufficient: {metadata.get('retrieval_sufficient')}")
+    lines.append(f"- retrieval_insufficient_reason: {metadata.get('retrieval_insufficient_reason')}")
+    lines.append(f"- retrieval_result_count: {metadata.get('retrieval_result_count')}")
+    lines.append(f"- retrieval_attempt_count: {metadata.get('retrieval_attempt_count')}")
+    lines.append(f"- tools_planned: {metadata.get('tools_planned')}")
+    lines.append(f"- tools_executed: {metadata.get('tools_executed')}")
+    return "\n".join(lines)
+
+
+async def initial_intent_planning_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState:
+    next_state = dict(state)
+    metadata = dict(next_state.get("metadata") or {})
+    question = str(next_state.get("question") or "").strip()
+    context_prompt = str(next_state.get("context_prompt") or "").strip()
+    deps = next_state.get("deps")
+    capabilities = _build_planner_capabilities(deps)
+
+    try:
+        model = get_langchain_chat_model()
+    except Exception:
+        model = None
+
+    planner_debug = await plan_user_intent_debug(
+        question=question,
+        context_hint=context_prompt,
+        model=model,
+        capabilities=capabilities,
+    )
+    plan_payload = dict(planner_debug.get("normalized_plan") or {})
+    next_state["intent_plan"] = plan_payload
+    planner_decision = {
+        "intent": plan_payload.get("intent"),
+        "needs_retrieval": bool(plan_payload.get("needs_retrieval")),
+        "direct_answer_allowed": bool(plan_payload.get("direct_answer_allowed")),
+        "allow_external_sources": bool(plan_payload.get("allow_external_sources")),
+        "planned_tools": [
+            step.get("tool")
+            for step in list(plan_payload.get("retrieval_steps") or [])
+            if isinstance(step, dict) and step.get("tool")
+        ],
+        "evidence_policy": plan_payload.get("evidence_policy"),
+        "reason": plan_payload.get("reason"),
+        "warnings": list(plan_payload.get("warnings") or []),
+    }
+    metadata["planner_decision"] = planner_decision
+    metadata["intent"] = plan_payload.get("intent")
+    metadata["direct_answer_allowed"] = bool(plan_payload.get("direct_answer_allowed"))
+    metadata["retrieval_skipped_by_planner"] = bool(not plan_payload.get("needs_retrieval"))
+    metadata["retrieval_skip_reason"] = str(plan_payload.get("reason") or "planner_decided_direct_answer")
+    metadata["fallback_used"] = bool(planner_debug.get("fallback_used"))
+    metadata["fallback_reason"] = str(planner_debug.get("fallback_reason") or "")
+    metadata["fallback_decision"] = str(planner_debug.get("fallback_decision") or "")
+    metadata["raw_model_content_preview"] = str(planner_debug.get("raw_model_content_preview") or "")
+    metadata["source_requirements"] = dict(plan_payload.get("source_requirements") or {})
+    metadata["answer_policy"] = dict(plan_payload.get("answer_policy") or {})
+    metadata["intent_plan"] = plan_payload
+    next_state["metadata"] = metadata
+    return next_state
+
+
+def route_after_initial_intent(state: LangGraphAnalysisState) -> str:
+    raw_plan = state.get("intent_plan") or {}
+    if isinstance(raw_plan, dict) and bool(raw_plan.get("needs_retrieval")):
+        return "inspect_documents"
+    return "generate_analysis"
 
 
 def _doc_to_dict(doc: Any) -> Dict[str, Any]:
@@ -716,6 +847,7 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
     question = str(next_state.get("question") or "").strip()
     attempt_count = int(next_state.get("retrieval_attempt_count") or 0) + 1
     next_state["retrieval_attempt_count"] = attempt_count
+    metadata = dict(next_state.get("metadata") or {})
 
     if attempt_count <= 1:
         query = question
@@ -724,7 +856,7 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
     next_state["current_query"] = query
 
     limit = 3 if attempt_count == 1 else 5
-    await _emit_progress(next_state, f"正在进行第 {attempt_count} 轮本地知识库检索...")
+    await _emit_progress(next_state, "正在规划回答...")
 
     existing_results = list(next_state.get("retrieval_results") or [])
     attempts = list(next_state.get("retrieval_attempts") or [])
@@ -746,15 +878,132 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
 
     try:
         tools = build_langchain_tools(deps)
-        search_tool = _find_tool_by_name(tools, "search_knowledge_base")
-        if search_tool is None:
-            _append_warning(next_state, "search_knowledge_base tool not found.")
-            round_results: List[Dict[str, Any]] = []
-            attempt_error: Optional[str] = "search_knowledge_base tool not found"
-        else:
-            round_results = list(await search_tool.ainvoke({"query": query, "limit": limit}) or [])
-            _append_tool_call(next_state, "search_knowledge_base", {"query": query, "limit": limit})
-            attempt_error = None
+        capabilities = _build_planner_capabilities(deps)
+        retry_plan_used = False
+        planner_used = False
+        planner_fallback_used = False
+        fallback_reason = ""
+        fallback_decision = ""
+        planner_debug: Dict[str, Any] = {}
+
+        try:
+            try:
+                planner_model = get_langchain_chat_model()
+            except Exception:
+                planner_model = None
+            planner_debug = await plan_user_intent_debug(
+                question=question,
+                context_hint=str(next_state.get("context_prompt") or ""),
+                model=planner_model,
+                capabilities=capabilities,
+            )
+            planner_used = True
+            plan = IntentPlan.model_validate(planner_debug.get("normalized_plan") or {})
+        except Exception as exc:
+            planner_fallback_used = True
+            fallback_reason = str(exc)
+            fallback_decision = "local_retrieval_fallback"
+            plan = build_fallback_intent_plan(
+                question=query or question,
+                capabilities=capabilities,
+                reason=fallback_reason or "planner_failed",
+            )
+
+        if plan.needs_retrieval and not list(plan.retrieval_steps or []):
+            planner_fallback_used = True
+            fallback_reason = fallback_reason or "planner returned retrieval intent without retrieval_steps"
+            fallback_decision = "local_retrieval_fallback"
+            plan = build_fallback_intent_plan(
+                question=query or question,
+                capabilities=capabilities,
+                reason=fallback_reason,
+            )
+
+        plan_payload = plan.model_dump()
+        next_state["intent_plan"] = plan_payload
+        planner_decision = {
+            "intent": plan.intent,
+            "needs_retrieval": bool(plan.needs_retrieval),
+            "direct_answer_allowed": bool(plan.direct_answer_allowed),
+            "allow_external_sources": bool(plan.allow_external_sources),
+            "planned_tools": [step.tool for step in plan.retrieval_steps],
+            "evidence_policy": plan.evidence_policy,
+            "reason": plan.reason,
+            "warnings": list(plan.warnings or []),
+        }
+        metadata["planner_used"] = planner_used
+        metadata["intent_planner_used"] = planner_used
+        metadata["planner_fallback_used"] = planner_fallback_used
+        metadata["retry_plan_used"] = retry_plan_used
+        metadata["intent_plan"] = plan_payload
+        metadata["planner_decision"] = planner_decision
+        metadata["planner_capabilities"] = capabilities.model_dump()
+        metadata["available_tools"] = capabilities.available_tools()
+        metadata["intent"] = plan.intent
+        metadata["direct_answer_allowed"] = bool(plan.direct_answer_allowed)
+        metadata["tools_planned"] = [step.model_dump() for step in plan.retrieval_steps]
+        metadata["planned_retrieval_steps"] = [step.model_dump() for step in plan.retrieval_steps]
+        metadata["fallback_used"] = bool(planner_debug.get("fallback_used")) or planner_fallback_used
+        metadata["fallback_reason"] = fallback_reason or str(planner_debug.get("fallback_reason") or "")
+        metadata["fallback_decision"] = fallback_decision or str(planner_debug.get("fallback_decision") or "")
+        metadata["raw_model_content_preview"] = str(planner_debug.get("raw_model_content_preview") or "")
+
+        if not bool(plan.needs_retrieval):
+            metadata["retrieval_skipped_by_planner"] = True
+            metadata["retrieval_skip_reason"] = str(plan.reason or "planner_decided_direct_answer")
+            metadata["tools_executed"] = []
+            metadata["filtered_unavailable_tools"] = []
+            metadata["source_count"] = 0
+            metadata["sources_count"] = 0
+            next_state["metadata"] = metadata
+            next_state["sources"] = []
+            next_state["retrieval_results"] = existing_results
+            attempts.append(
+                {
+                    "attempt": attempt_count,
+                    "query": query,
+                    "limit": limit,
+                    "result_count": 0,
+                    "top_score": None,
+                    "skipped_by_planner": True,
+                    "skip_reason": metadata["retrieval_skip_reason"],
+                }
+            )
+            next_state["retrieval_attempts"] = attempts
+            await _emit_progress(next_state, "已判断本轮可直接回答，跳过本地检索。")
+            await _emit_progress(next_state, "正在生成回答...")
+            return next_state
+
+        await _emit_progress(next_state, f"正在执行第 {attempt_count} 轮检索...")
+        exec_out = await execute_intent_plan_steps(
+            plan=plan,
+            tools=tools,
+            fallback_query=query,
+            capabilities=capabilities,
+        )
+        round_results = list(exec_out.get("results") or [])
+        tools_planned = list(exec_out.get("planned_steps") or [step.model_dump() for step in plan.retrieval_steps])
+        tools_executed_raw = list(exec_out.get("tools_executed") or [])
+        filtered_unavailable_tools = list(exec_out.get("filtered_unavailable_tools") or [])
+        for warning_text in list(exec_out.get("warnings") or []):
+            _append_warning(next_state, str(warning_text))
+
+        tools_executed: List[str] = []
+        for item in tools_executed_raw:
+            if isinstance(item, dict):
+                tool_name = str(item.get("tool") or "").strip()
+                if tool_name:
+                    tools_executed.append(tool_name)
+                    _append_tool_call(next_state, tool_name, dict(item.get("args") or {}))
+            elif isinstance(item, str) and item.strip():
+                tools_executed.append(item.strip())
+
+        metadata["tools_planned"] = tools_planned
+        metadata["tools_executed"] = tools_executed
+        metadata["filtered_unavailable_tools"] = filtered_unavailable_tools
+        metadata["retrieval_skipped_by_planner"] = False
+        metadata["retrieval_skip_reason"] = ""
+        metadata["retrieval_summary_for_planner"] = summarize_hits_for_planner(round_results)
 
         scope_policy = str(next_state.get("scope_policy") or "broad_kb")
         target_ids = _extract_target_ids(list(next_state.get("target_documents") or []))
@@ -777,8 +1026,6 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
         if target_ids:
             attempt["target_document_ids"] = target_ids
             attempt["supplemental_used"] = used_supplemental
-        if attempt_error:
-            attempt["error"] = attempt_error
         attempts.append(attempt)
         next_state["retrieval_attempts"] = attempts
         next_state["retrieval_results"] = merged
@@ -789,9 +1036,12 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
             allow_supplemental=allow_supplemental,
             supplemental_used=used_supplemental,
         )
+        metadata["source_count"] = len(list(next_state.get("sources") or []))
+        metadata["sources_count"] = len(list(next_state.get("sources") or []))
+        next_state["metadata"] = metadata
         await _emit_progress(
             next_state,
-            f"第 {attempt_count} 轮检索得到 {len(round_results)} 条，累计 {len(merged)} 条。",
+            f"第 {attempt_count} 轮检索完成，得到 {len(round_results)} 条，累计 {len(merged)} 条。",
         )
     except Exception as exc:
         _append_warning(next_state, f"local retrieval failed: {exc}")
@@ -813,6 +1063,26 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
 
 async def grade_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState:
     next_state = dict(state)
+    metadata = dict(next_state.get("metadata") or {})
+    planner_decision = metadata.get("planner_decision") or {}
+    retrieval_skipped_by_planner = bool(metadata.get("retrieval_skipped_by_planner"))
+    direct_answer_allowed = bool(
+        metadata.get("direct_answer_allowed")
+        or planner_decision.get("direct_answer_allowed")
+    )
+
+    if retrieval_skipped_by_planner and direct_answer_allowed:
+        next_state["retrieval_sufficient"] = True
+        next_state["retrieval_insufficient_reason"] = None
+        next_state["retrieval_top_score"] = None
+        next_state["skip_rewrite"] = True
+        metadata["retrieval_sufficient"] = True
+        metadata["retrieval_insufficient_reason"] = "retrieval_skipped_by_planner_direct_answer"
+        metadata["retrieval_top_score"] = None
+        metadata["retrieval_retry_trigger"] = "planner_direct_answer"
+        next_state["metadata"] = metadata
+        return next_state
+
     await _emit_progress(next_state, "正在评估检索片段是否足以回答问题...")
     results = list(next_state.get("retrieval_results") or [])
 
@@ -1142,7 +1412,7 @@ def _build_retrieval_evaluation_summary(evaluation: Optional[Dict[str, Any]]) ->
 
 def _humanize_warning(warning: str) -> Optional[str]:
     if "No retrieval evidence found" in warning:
-        return "当前没有检索到直接相关片段，以下内容更适合作为一般性分析参考。"
+        return "本轮没有可核对的检索片段；未被检索证据支持的结论请谨慎参考。"
     if "strong evidence wording but no sources" in warning:
         return "回答存在较强结论措辞，但未收集到可核对来源，请谨慎参考。"
     return None
@@ -1150,7 +1420,11 @@ def _humanize_warning(warning: str) -> Optional[str]:
 
 async def generate_analysis_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState:
     next_state = dict(state)
-    await _emit_progress(next_state, "正在整合证据并生成最终分析...")
+    metadata = dict(next_state.get("metadata") or {})
+    if bool(metadata.get("retrieval_skipped_by_planner")) and bool(metadata.get("direct_answer_allowed")):
+        await _emit_progress(next_state, "正在生成回答...")
+    else:
+        await _emit_progress(next_state, "正在整合证据并生成最终分析...")
     question = str(next_state.get("question") or "").strip()
     context_prompt = str(next_state.get("context_prompt") or "").strip()
     documents = list(next_state.get("documents") or [])
@@ -1160,8 +1434,15 @@ async def generate_analysis_node(state: LangGraphAnalysisState) -> LangGraphAnal
     rewritten_queries = list(next_state.get("rewritten_queries") or [])
     retrieval_evaluation = next_state.get("retrieval_evaluation")
     answer_scope = dict(next_state.get("answer_scope") or {})
+    intent_plan = dict(metadata.get("intent_plan") or {})
+    answer_policy = dict(
+        metadata.get("answer_policy")
+        or intent_plan.get("answer_policy")
+        or {}
+    )
     scope_policy = str(next_state.get("scope_policy") or "broad_kb")
     answer_instruction = str(answer_scope.get("answer_instruction") or "")
+    runtime_decision_summary = _build_runtime_decision_summary(metadata)
 
     context_block = ""
     if context_prompt:
@@ -1173,13 +1454,25 @@ async def generate_analysis_node(state: LangGraphAnalysisState) -> LangGraphAnal
         f"文档列表（最多5条）：\n{_summarize_documents(documents)}\n\n"
         f"检索结果（最多3条）：\n{_summarize_retrieval_results(retrieval_results)}\n\n"
         f"检索尝试摘要：\n{_build_retrieval_attempts_summary(retrieval_attempts, rewritten_queries)}\n\n"
+        f"运行决策摘要：\n{runtime_decision_summary}\n\n"
         f"回答范围策略：{scope_policy}\n"
         f"回答范围说明：{answer_instruction or 'N/A'}\n\n"
+        f"本轮回答策略：\n{json.dumps(answer_policy, ensure_ascii=False, indent=2) if answer_policy else 'N/A'}\n\n"
         f"当前告警：\n{chr(10).join(warnings) if warnings else '无'}\n\n"
         "请根据用户问题和检索片段自然组织中文回答。优先完成用户当前任务。"
         "可以综合多个片段进行总结、比较和分析。"
         "对片段明确支持的内容直接分析；对片段没有覆盖的具体点，可以自然说明边界。"
+        "回答时请区分 planner 主动跳过检索、检索失败、检索不足和已有证据回答。"
+        "如果 planner 主动跳过检索并允许 direct answer，请直接回答，不要声称检索失败。"
+        "如果执行过检索但证据不足，只在相关结论处说明证据边界。"
+        "不要把主动跳过检索说成检索失败。"
         "不要编造论文细节，不要把推断说成论文原文结论。"
+        "请严格遵守："
+        "只能使用 allowed_source_types；不得使用 blocked_source_types；"
+        "如果 must_disclose_limitations=true，必须说明能力边界；"
+        "不得把一种来源伪装成另一种来源；"
+        "如果 mode=direct_answer 或 answer_with_disclosure，不要声称执行了检索；"
+        "如果 mode=retrieve_and_answer，回答必须依据 retrieval_results。"
     )
     if scope_policy == "strict_target":
         prompt += (
@@ -1206,8 +1499,8 @@ async def generate_analysis_node(state: LangGraphAnalysisState) -> LangGraphAnal
         _append_warning(next_state, f"analysis generation failed: {exc}")
         fallback = "当前分析生成阶段出现异常。我会基于已有检索片段继续完成回答。"
         if not retrieval_results:
-            fallback += " 当前没有检索到直接相关片段。"
-        next_state["draft_answer"] = fallback
+            fallback += " 本轮没有可核对的检索片段。"
+        next_state["draft_answer"] = clean_legacy_warning_text(fallback)
     return next_state
 
 
@@ -1217,8 +1510,15 @@ async def evidence_check_node(state: LangGraphAnalysisState) -> LangGraphAnalysi
     sources = list(next_state.get("sources") or [])
     retrieval_results = list(next_state.get("retrieval_results") or [])
     draft_answer = str(next_state.get("draft_answer") or "")
+    metadata = dict(next_state.get("metadata") or {})
+    planner_decision = dict(metadata.get("planner_decision") or {})
+    retrieval_skipped_by_planner = bool(metadata.get("retrieval_skipped_by_planner"))
+    direct_answer_allowed = bool(
+        metadata.get("direct_answer_allowed")
+        or planner_decision.get("direct_answer_allowed")
+    )
 
-    if not retrieval_results:
+    if not retrieval_results and not (retrieval_skipped_by_planner and direct_answer_allowed):
         _append_warning(
             next_state,
             "No retrieval evidence found; answer should be treated as general guidance.",
@@ -1242,6 +1542,7 @@ async def evidence_check_node(state: LangGraphAnalysisState) -> LangGraphAnalysi
     metadata = dict(next_state.get("metadata") or {})
     metadata["evidence_checked"] = True
     metadata["source_count"] = len(sources)
+    metadata["sources_count"] = len(sources)
     metadata["retrieval_result_count"] = len(retrieval_results)
     next_state["metadata"] = metadata
     return next_state
@@ -1277,9 +1578,9 @@ async def finalize_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState
     if warnings:
         notes = [text for text in (_humanize_warning(item) for item in warnings[:2]) if text]
         if notes:
-            answer = answer + "\n\n说明：" + "；".join(notes)
+            answer = answer + "\n\n注：" + "；".join(notes)
 
-    next_state["final_answer"] = answer
+    next_state["final_answer"] = clean_legacy_warning_text(answer)
     scope_policy = scope_policy or "broad_kb"
     target_ids = _extract_target_ids(target_documents)
     supplemental_used = any(bool((a or {}).get("supplemental_used")) for a in retrieval_attempts_final)
@@ -1398,8 +1699,8 @@ async def run_langgraph_analysis(
     }
 
     if progress_callback is not None:
-        await progress_callback("正在识别任务类型...")
-        await progress_callback("正在判断需要哪些工具...")
+        await progress_callback("正在规划回答...")
+        await progress_callback("正在规划回答...")
     final_state = await graph.ainvoke(initial_state)
     message = str(final_state.get("final_answer") or final_state.get("draft_answer") or "").strip()
     tools_used = list(final_state.get("tools_used") or [])

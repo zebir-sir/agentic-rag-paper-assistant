@@ -1,33 +1,38 @@
-﻿# Evals: 轻量评测与效果验证
+# Evals
 
-本目录提供项目级轻量评测，用于验证检索与回答链路是否按预期工作，并用于展示工程验证能力。它不是大规模 benchmark。
+轻量评测模块，用于验证本项目的三条核心链路：
+- 普通检索效果（Retrieval Eval）
+- 章节级检索效果（Section Eval A/B）
+- LangGraph 多轮检索闭环（Retrieval Loop Eval）
+
+说明：这是项目级验证，不是大规模 benchmark。
 
 ## 文件说明
-- `retrieval_cases.json`：普通检索评测样例
-- `section_cases.json`：章节级检索 A/B 评测样例
-- `retrieval_loop_cases.json`：LangGraph 多轮检索闭环评测样例
+- `retrieval_cases.json`：普通检索样例
+- `section_cases.json`：章节检索 A/B 样例
+- `retrieval_loop_cases.json`：多轮检索闭环样例
 - `run_retrieval_eval.py`：普通检索评测脚本
-- `run_section_eval.py`：章节级 A/B 评测脚本（Section Search vs Hybrid Search）
-- `run_retrieval_loop_eval.py`：LangGraph 多轮检索闭环评测脚本
-- `answer_quality_cases.md`：人工回答质量 Rubric 模板
-- `results/`：评测输出目录（JSON + Markdown）
+- `run_section_eval.py`：章节检索 A/B 脚本
+- `run_retrieval_loop_eval.py`：多轮检索闭环脚本
+- `answer_quality_cases.md`：人工评分模板
+- `results/`：评测输出（JSON + Markdown）
 
-## 三类评测目标
-- Retrieval Eval：验证普通 hybrid 检索是否命中目标论文与关键内容
-- Section Eval A/B：对比 section_search 与 hybrid_search 在章节命中和顺序上的差异
-- Retrieval Loop Eval：验证 LangGraph 多轮检索、query rewrite、retrieval confidence 的工作情况
+## 运行命令
+```bash
+docker compose exec api python evals/run_retrieval_eval.py --limit 5
+docker compose exec api python evals/run_section_eval.py --limit 5
+docker compose exec api python evals/run_retrieval_loop_eval.py --max-cases 5 --timeout-seconds 120 --verbose
+```
 
-## 指标解释
-- `Doc Hit@K`：TopK 是否命中期望论文关键词
-- `Section Hit@K`：TopK 是否命中期望章节关键词（retrieval eval）
-- `Section Precision@K`：TopK 中命中目标章节的比例（section A/B）
-- `Keyword Recall@K`：TopK 内容对期望关键词的覆盖比例
-- `Order OK`：结果是否大致按章节顺序返回
-- `Rewrite Used Rate`：发生 query rewrite 的比例
+## 指标（简要）
+- `Doc Hit@K`：是否命中目标论文
+- `Section Hit@K` / `Section Precision@K`：章节命中效果
+- `Keyword Recall@K`：关键词覆盖度
+- `Order OK`：章节顺序保持
+- `Rewrite Used Rate`：闭环中 query rewrite 使用比例
 - `Avg Retrieval Attempts`：平均检索轮数
-- `Avg Retrieval Confidence`：平均检索置信度
 
-## 真实结果摘要
+## 当前结果摘要
 
 ### Retrieval Eval (limit=5)
 | Metric | Value |
@@ -56,14 +61,21 @@
 | Avg Retrieval Attempts | 1.60 |
 | Avg Retrieval Confidence | 0.64 |
 
-## Docker 运行命令
-```bash
-docker compose exec api python evals/run_retrieval_eval.py --limit 5
-docker compose exec api python evals/run_section_eval.py --limit 5
-docker compose exec api python evals/run_retrieval_loop_eval.py --max-cases 5 --timeout-seconds 120 --verbose
-```
+## 结果解读（简要）
+- `section_search` 更适合章节限定问题（如只看 Abstract/Experiments/References）。
+- `hybrid_search` 在全局命中与关键词覆盖上更强，适合开放式问答。
+- 多轮检索闭环会在部分挑战问题中触发 rewrite，提升覆盖能力。
+- 两类检索策略是互补关系，不是单向替代。
+
+## 结果文件
+- `evals/results/retrieval_eval.json`
+- `evals/results/retrieval_eval.md`
+- `evals/results/section_eval.json`
+- `evals/results/section_eval.md`
+- `evals/results/retrieval_loop_eval.json`
+- `evals/results/retrieval_loop_eval.md`
 
 ## 注意事项
-- 评测集是轻量级项目评测，不是大规模 benchmark。
-- 结果依赖当前已入库论文、数据库状态、模型与 embedding 配置。
-- 评测分数应结合具体场景理解，不建议跨项目直接横向比较。
+- 结果依赖当前数据库中已入库论文。
+- 部分评测依赖模型与 embedding 配置。
+- Web/OpenAlex 能力受外部配置影响，不可用时会影响对应评测链路。

@@ -16,6 +16,7 @@ try:
         fetch_sessions,
         fetch_web_search_status,
         format_session_time,
+        clean_assistant_display_text,
         stream_chat,
         cancel_ingestion_job,
         fetch_ingestion_job,
@@ -32,6 +33,7 @@ except ImportError:  # pragma: no cover - streamlit script mode
         fetch_sessions,
         fetch_web_search_status,
         format_session_time,
+        clean_assistant_display_text,
         stream_chat,
         cancel_ingestion_job,
         fetch_ingestion_job,
@@ -61,7 +63,7 @@ def ensure_app_state() -> None:
         "use_web_search": False,
         "use_openalex_search": False,
         "use_general_web_search": False,
-        "use_react": False,
+        "use_react": True,
         "search_type": "hybrid",
         "is_streaming": False,
         "stop_requested": False,
@@ -186,6 +188,8 @@ def send_user_message(
     base_url: str,
     search_type: str,
     use_web_search: bool,
+    allow_web_search: bool,
+    allow_openalex_search: bool,
     use_react: bool,
 ) -> None:
     ensure_app_state()
@@ -198,15 +202,23 @@ def send_user_message(
     with st.chat_message("user"):
         st.write(message)
     with st.chat_message("assistant"):
-        stream_chat(message, base_url, search_type, use_web_search, use_react, USER_ID)
+        stream_chat(
+            message=message,
+            base_url=base_url,
+            search_type=search_type,
+            use_web_search=use_web_search,
+            use_react=use_react,
+            user_id=USER_ID,
+            allow_web_search=allow_web_search,
+            allow_openalex_search=allow_openalex_search,
+        )
     st.session_state.session_list = fetch_sessions(base_url)
 
 
 def _effective_use_web_search(openalex_enabled: bool, general_web_enabled: bool) -> bool:
-    return bool(
-        (st.session_state.use_openalex_search and openalex_enabled)
-        or (st.session_state.use_general_web_search and general_web_enabled)
-    )
+    allow_openalex = bool(st.session_state.get("use_openalex_search", False))
+    allow_web = bool(st.session_state.get("use_general_web_search", False))
+    return bool((allow_openalex and openalex_enabled) or (allow_web and general_web_enabled))
 
 
 def render_welcome_guide() -> None:
@@ -334,26 +346,21 @@ def _render_tools_compact(
 ) -> None:
     def _render_body() -> None:
         st.toggle(
-            "OpenAlex 论文检索",
+            "OpenAlex 检索",
             key="use_openalex_search",
-            value=st.session_state.use_openalex_search,
-            disabled=not openalex_enabled,
-            help="用于补充知识库外的论文 metadata、摘要和 related work；本地知识库问答不需要开启。",
+            help="开启仅表示允许系统使用 OpenAlex 学术元数据检索，是否调用由 Planner 自动判断。",
         )
         st.toggle(
-            "通用网页搜索",
+            "Web 检索",
             key="use_general_web_search",
-            value=st.session_state.use_general_web_search,
-            disabled=not general_web_enabled,
-            help=f"用于普通网页资料、技术解释、最新资料和非论文来源检索；当前 provider: {general_web_provider or '未配置'}。",
+            help="开启仅表示允许系统联网检索网页信息，是否调用由 Planner 自动判断。",
         )
         st.toggle(
-            "深度分析",
+            "深度分析 / ReAct",
             key="use_react",
-            value=st.session_state.use_react,
-            help="开启后，本轮会进行更严格的任务规划、工具选择与依据核对。",
+            help="开启后使用 Planner-guided 深度分析流程；关闭时走普通聊天路径。",
         )
-        st.radio("检索方式", options=["hybrid", "vector"], key="search_type", horizontal=True)
+        st.caption("系统会在你开启的能力范围内自动规划检索。")
         if not openalex_enabled:
             if backend_health_ok:
                 st.caption("OpenAlex 当前不可用（未配置 OPENALEX_API_KEY）。")
@@ -379,7 +386,7 @@ def render_input_toolbar(
     general_web_enabled: bool,
     general_web_provider: str,
 ) -> None:
-    st.caption("可选：选择分析模板或调整检索工具")
+    st.caption("系统会在你开启的能力范围内自动规划本地检索、章节检索、图表/算法检索以及可用的外部检索。")
     left, right = st.columns([2.1, 7.9])
     with left:
         c1, c2 = st.columns(2)
@@ -462,7 +469,7 @@ if not st.session_state.messages:
 for idx, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         if msg["role"] == "assistant":
-            st.markdown(msg["content"])
+            st.markdown(clean_assistant_display_text(msg["content"]))
         else:
             st.write(msg["content"])
         if msg["role"] == "assistant":
@@ -477,9 +484,11 @@ if st.session_state.pending_prompt:
     send_user_message(
         pending,
         resolved_base_url,
-        str(st.session_state.search_type),
+        "hybrid",
         _effective_use_web_search(openalex_enabled, general_web_enabled),
-        bool(st.session_state.use_react),
+        bool(st.session_state.get("use_general_web_search", False)),
+        bool(st.session_state.get("use_openalex_search", False)),
+        bool(st.session_state.get("use_react", True)),
     )
     st.rerun()
 
@@ -500,7 +509,9 @@ if prompt := st.chat_input("请输入您的问题", disabled=not backend_health_
     send_user_message(
         prompt,
         resolved_base_url,
-        str(st.session_state.search_type),
+        "hybrid",
         _effective_use_web_search(openalex_enabled, general_web_enabled),
-        bool(st.session_state.use_react),
+        bool(st.session_state.get("use_general_web_search", False)),
+        bool(st.session_state.get("use_openalex_search", False)),
+        bool(st.session_state.get("use_react", True)),
     )

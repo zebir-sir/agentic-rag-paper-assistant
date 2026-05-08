@@ -1,14 +1,15 @@
-﻿import base64
+import base64
 import json
 import os
 import time
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 import streamlit as st
 
 STREAM_READ_TIMEOUT_SECONDS = float(os.getenv("STREAM_READ_TIMEOUT_SECONDS", "90"))
+VISIBLE_STATUS_PHASES = {"planning", "document_inspection", "retrieval", "generation", "warning"}
 
 try:
     from ui.components import render_sources
@@ -24,7 +25,7 @@ def ensure_chat_state() -> None:
         "restored_session_id": None,
         "pending_prompt": None,
         "use_web_search": False,
-        "use_react": False,
+        "use_react": True,
         "search_type": "hybrid",
         "is_streaming": False,
         "stop_requested": False,
@@ -32,6 +33,75 @@ def ensure_chat_state() -> None:
     for key, default in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = list(default) if isinstance(default, list) else default
+
+
+def clean_assistant_display_text(text: str) -> str:
+    value = str(text or "")
+    legacy = "当前没有检索到直接相关片段，以下内容更适合作为一般性分析参考。"
+    neutral = "本轮没有可核对的检索片段；未被检索证据支持的结论请谨慎参考。"
+    value = value.replace(legacy, neutral)
+    value = value.replace("以下内容更适合作为一般性分析参考。", "")
+    value = value.replace("以下内容", "")
+    return value
+
+
+def normalize_status_text(data: Dict[str, Any]) -> str:
+    phase = str(data.get("phase") or "")
+    content = str(data.get("content") or "")
+    phase_key = phase.strip().lower()
+    if phase_key == "planning":
+        return "正在规划回答..."
+    if phase_key == "retrieval":
+        return content or "正在检索相关资料..."
+    if phase_key == "generation":
+        return "正在生成回答..."
+    if phase_key == "document_inspection":
+        return "正在读取知识库文档..."
+    return content
+
+
+def map_status_text(content: str, phase: str) -> str:
+    phase_key = str(phase or "").strip().lower()
+    if phase_key == "planning":
+        return "正在规划回答..."
+    if phase_key == "document_inspection":
+        return "正在读取知识库文档..."
+    if phase_key == "generation":
+        return "正在生成回答..."
+    if phase_key == "retrieval":
+        text = str(content or "").strip()
+        return text or "正在检索相关资料..."
+    if phase_key == "warning":
+        return str(content or "").strip()
+    return ""
+
+
+def should_show_status_event(data: Dict[str, Any]) -> bool:
+    if not isinstance(data, dict):
+        return False
+    if data.get("user_visible") is False:
+        return False
+    phase = str(data.get("phase") or "").strip()
+    if phase:
+        return phase in {"planning", "retrieval", "generation", "warning", "document_inspection"}
+    content = str(data.get("content") or "")
+    hidden_markers = [
+        "正在检查知识库文档",
+        "Local retrieval round",
+        "Retrieval round",
+        "Compressing conversation history",
+        "Searching local knowledge base",
+        "Analyzing the question and generating an answer",
+    ]
+    return not any(marker in content for marker in hidden_markers)
+
+
+def should_display_status_event(event: Dict[str, Any]) -> bool:
+    phase = str(event.get("phase") or "").strip().lower()
+    user_visible = bool(event.get("user_visible", True))
+    if not user_visible:
+        return False
+    return phase in VISIBLE_STATUS_PHASES
 
 
 def fetch_openalex_status(base_url: str) -> bool:
@@ -233,8 +303,17 @@ def stream_chat(
     use_web_search: bool,
     use_react: bool,
     user_id: str,
+    allow_web_search: bool = False,
+    allow_openalex_search: bool = False,
+    metadata: Optional[Dict[str, Any]] = None,
+    **_: Any,
 ):
     ensure_chat_state()
+    request_metadata: Dict[str, Any] = dict(metadata or {})
+    request_metadata.update({
+        "allow_web_search": bool(allow_web_search),
+        "allow_openalex_search": bool(allow_openalex_search),
+    })
     request_data = {
         "message": message,
         "session_id": st.session_state.active_session_id,
@@ -242,6 +321,7 @@ def stream_chat(
         "search_type": search_type,
         "use_web_search": use_web_search,
         "use_react": use_react,
+        "metadata": request_metadata,
     }
     status_box = st.empty()
     response_box = st.empty()
@@ -271,10 +351,12 @@ def stream_chat(
                 st.session_state.active_session_id = data.get("session_id")
                 status_box.info("已连接后端，正在等待回答...")
             elif dtype == "status":
-                status_text = str(data.get("content", "") or "")
-                if "检测到回答格式异常" in status_text or "正在重新生成" in status_text:
+                if not should_show_status_event(data):
                     continue
-                status_box.info(status_text)
+                mapped = normalize_status_text(data)
+                if not mapped:
+                    continue
+                status_box.info(mapped)
             elif dtype == "text":
                 status_box.empty()
                 full_response += data.get("content", "")
@@ -302,7 +384,9 @@ def stream_chat(
         status_box.empty()
     stop_box.empty()
     if full_response.strip():
-        response_box.markdown(full_response)
+        cleaned_response = clean_assistant_display_text(full_response)
+        response_box.markdown(cleaned_response)
+        full_response = cleaned_response
     elif stopped_by_user:
         response_box.info("已停止继续生成，已保留当前输出内容。")
     elif not stream_error:
@@ -315,7 +399,7 @@ def stream_chat(
         if stream_error:
             metadata["stream_error"] = stream_error
         st.session_state.messages.append(
-            {"role": "assistant", "content": full_response, "metadata": metadata}
+            {"role": "assistant", "content": clean_assistant_display_text(full_response), "metadata": metadata}
         )
     st.session_state.restored_session_id = st.session_state.active_session_id
     st.session_state.is_streaming = False

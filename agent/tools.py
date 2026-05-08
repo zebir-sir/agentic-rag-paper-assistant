@@ -14,6 +14,7 @@ from .db_utils import (
     vector_search,
     hybrid_search,
     section_search,
+    artifact_search,
     get_document,
     list_documents,
     get_document_chunks,
@@ -70,6 +71,14 @@ class SectionSearchInput(BaseModel):
     section_query: str = Field(..., description="Section title/path keyword, e.g. Method, Experiments, References")
     document_id: Optional[str] = Field(default=None, description="Optional document UUID to restrict search")
     limit: int = Field(default=10, ge=1, le=50)
+
+
+class ArtifactSearchInput(BaseModel):
+    query: str
+    limit: int = Field(default=10, ge=1, le=50)
+    artifact_types: Optional[List[str]] = None
+    document_id: Optional[str] = None
+    text_weight: float = Field(default=0.3, ge=0.0, le=1.0)
 
 
 class DocumentInput(BaseModel):
@@ -566,6 +575,51 @@ async def section_search_tool(input_data: SectionSearchInput) -> List[ChunkResul
         ]
     except Exception as e:
         logger.exception("Section search failed: %s", e)
+        raise
+
+
+async def artifact_search_tool(input_data: ArtifactSearchInput) -> List[ChunkResult]:
+    allowed_types = {"table", "figure", "algorithm"}
+    normalized_types = []
+    for t in (input_data.artifact_types or []):
+        value = str(t or "").strip().lower()
+        if value in allowed_types:
+            normalized_types.append(value)
+    if not normalized_types:
+        normalized_types = ["table", "figure", "algorithm"]
+
+    try:
+        embedding = await generate_embedding(input_data.query)
+    except Exception as e:
+        logger.exception("Artifact search embedding failed: %s", e)
+        raise
+
+    try:
+        results = await asyncio.wait_for(
+            artifact_search(
+                embedding=embedding,
+                query_text=input_data.query,
+                limit=input_data.limit,
+                artifact_types=normalized_types,
+                document_id=input_data.document_id,
+                text_weight=input_data.text_weight,
+            ),
+            timeout=LOCAL_SEARCH_TIMEOUT_SECONDS,
+        )
+        return [
+            ChunkResult(
+                chunk_id=str(r["chunk_id"]),
+                document_id=str(r["document_id"]),
+                content=r["content"],
+                score=float(r.get("combined_score", r.get("score", 0.0))),
+                metadata=r["metadata"],
+                document_title=r["document_title"],
+                document_source=r["document_source"],
+            )
+            for r in results
+        ]
+    except Exception as e:
+        logger.exception("Artifact search failed: %s", e)
         raise
 
 

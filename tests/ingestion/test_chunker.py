@@ -231,3 +231,141 @@ class TestChunkerIntegration:
         # 检查元数据是否被保留
         for chunk in chunks:
             assert chunk.metadata["source"] == "ai_article.txt"
+
+
+class TestArtifactAwareChunking:
+    def test_detect_table_figure_algorithm_artifacts(self):
+        config = ChunkingConfig(
+            chunk_size=500,
+            chunk_overlap=50,
+            min_chunk_size=20,
+            use_semantic_splitting=False,
+        )
+        chunker = PDFSemanticChunker(config)
+        content = """
+# 1 Introduction
+Intro context line for the section.
+
+Table 1. Example summary table
+| Method | Score |
+|---|---|
+| A | 0.91 |
+| B | 0.89 |
+
+Bridge sentence before figure.
+<!-- image -->
+Fig. 1 Example pipeline overview.
+
+Algorithm 1 Generic Optimization Routine
+Input: observations
+Output: optimized plan
+Step 1: initialize state
+Step 2: iterate until convergence
+
+Closing paragraph after artifacts with additional context text to keep section length enough.
+""".strip()
+
+        chunks = chunker.chunk_content(content=content, title="Artifact Test", source="artifact.md")
+        artifact_chunks = [c for c in chunks if c.metadata.get("content_type") == "artifact"]
+        normal_chunks = [c for c in chunks if c.metadata.get("content_type") != "artifact"]
+
+        assert any(c.metadata.get("artifact_type") == "table" for c in artifact_chunks)
+        assert any(c.metadata.get("artifact_type") == "figure" for c in artifact_chunks)
+        assert any(c.metadata.get("artifact_type") == "algorithm" for c in artifact_chunks)
+
+        for c in artifact_chunks:
+            assert c.metadata.get("context_before") is not None
+            assert c.metadata.get("context_after") is not None
+            assert c.metadata.get("caption")
+            assert c.metadata.get("section_path_text")
+            assert c.metadata.get("chunk_method", "").startswith("artifact_")
+            assert c.metadata.get("retrieval_title")
+            assert c.metadata.get("artifact_start_line") >= c.metadata.get("section_start_line")
+            assert c.metadata.get("artifact_end_line") <= c.metadata.get("section_end_line")
+
+        assert normal_chunks, "Expected normal section chunks to remain"
+        merged_normal_text = "\n".join(c.content for c in normal_chunks)
+        assert "[Table omitted. See artifact chunk:" in merged_normal_text
+        assert "| Method | Score |" not in merged_normal_text
+        assert "[Figure omitted. See artifact chunk:" in merged_normal_text
+        assert "[Algorithm omitted. See artifact chunk:" in merged_normal_text
+
+    def test_artifact_context_is_bounded(self):
+        config = ChunkingConfig(
+            chunk_size=600,
+            chunk_overlap=50,
+            min_chunk_size=20,
+            use_semantic_splitting=False,
+        )
+        chunker = PDFSemanticChunker(config)
+        before = "A" * 800
+        after = "B" * 800
+        content = f"""
+# 2 Methods
+{before}
+![pipeline](figure.png)
+Figure 2 Overall process.
+{after}
+""".strip()
+        chunks = chunker.chunk_content(content=content, title="Bounds Test", source="bounds.md")
+        figure_chunk = next(c for c in chunks if c.metadata.get("artifact_type") == "figure")
+        assert len(figure_chunk.metadata.get("context_before", "")) <= 303
+        assert len(figure_chunk.metadata.get("context_after", "")) <= 303
+
+    def test_input_output_plain_text_does_not_trigger_algorithm(self):
+        config = ChunkingConfig(
+            chunk_size=500,
+            chunk_overlap=50,
+            min_chunk_size=20,
+            use_semantic_splitting=False,
+        )
+        chunker = PDFSemanticChunker(config)
+        content = """
+# 3 Analysis
+This section discusses model behavior in prose.
+Input: we use benchmark observations from multiple domains.
+Output: we report summary statistics and compare trends.
+These lines are descriptive and not procedural instructions.
+""".strip()
+        chunks = chunker.chunk_content(content=content, title="No Algo Trigger", source="plain.md")
+        algorithm_chunks = [c for c in chunks if c.metadata.get("artifact_type") == "algorithm"]
+        assert len(algorithm_chunks) == 0
+
+    def test_short_section_still_keeps_artifact_chunks(self):
+        config = ChunkingConfig(
+            chunk_size=400,
+            chunk_overlap=50,
+            min_chunk_size=180,
+            use_semantic_splitting=False,
+        )
+        chunker = PDFSemanticChunker(config)
+        content = """
+# 4 Tiny
+| K | V |
+|---|---|
+| a | b |
+""".strip()
+        chunks = chunker.chunk_content(content=content, title="Short Section", source="short.md")
+        artifact_chunks = [c for c in chunks if c.metadata.get("content_type") == "artifact"]
+        assert any(c.metadata.get("artifact_type") == "table" for c in artifact_chunks)
+
+    def test_figure_marker_and_caption_with_blank_line_are_merged(self):
+        config = ChunkingConfig(
+            chunk_size=500,
+            chunk_overlap=50,
+            min_chunk_size=20,
+            use_semantic_splitting=False,
+        )
+        chunker = PDFSemanticChunker(config)
+        content = """
+# 5 Visual
+Intro text before figure.
+<!-- image -->
+
+Fig. 1 Merged caption example.
+Tail text after figure.
+""".strip()
+        chunks = chunker.chunk_content(content=content, title="Figure Merge", source="figure.md")
+        figure_chunks = [c for c in chunks if c.metadata.get("artifact_type") == "figure"]
+        assert len(figure_chunks) == 1
+        assert "Fig. 1" in figure_chunks[0].metadata.get("caption", "")

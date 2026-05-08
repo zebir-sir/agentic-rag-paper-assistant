@@ -60,6 +60,15 @@ class MarkdownSection:
     end_line: int
 
 
+@dataclass
+class ArtifactCandidate:
+    artifact_type: str
+    start_line_idx: int
+    end_line_idx: int
+    caption: str
+    content: str
+
+
 class PDFSemanticChunker:
     """PDF 文档的语义分块器。"""
 
@@ -236,10 +245,9 @@ class PDFSemanticChunker:
         base_metadata: Dict[str, Any],
         title: str,
         source: str,
+        artifact_index_start: int = 0,
     ) -> List[DocumentChunk]:
         section_text = section.content.strip()
-        if len(section_text) < self.config.min_chunk_size:
-            return []
 
         section_metadata = {
             **base_metadata,
@@ -253,8 +261,24 @@ class PDFSemanticChunker:
             "section_end_line": section.end_line,
         }
 
+        artifact_candidates = self._extract_artifacts(section.content)
+        artifact_chunks = self._build_artifact_chunks(
+            section=section,
+            section_metadata=section_metadata,
+            artifact_candidates=artifact_candidates,
+            artifact_index_start=artifact_index_start,
+        )
+        artifact_aware_text = self._replace_artifacts_with_placeholders(
+            section.content, artifact_candidates
+        ).strip()
+
+        if len(section_text) < self.config.min_chunk_size and not artifact_chunks:
+            return []
+        if len(artifact_aware_text) < self.config.min_chunk_size:
+            return artifact_chunks
+
         section_chunks: List[DocumentChunk] = []
-        if len(section_text) <= self.config.max_chunk_size:
+        if len(artifact_aware_text) <= self.config.max_chunk_size:
             section_chunk_count = 1
             chunk_title = self._build_chunk_title(section, 0, section_chunk_count)
             section_path_text = " > ".join(section.path).strip()
@@ -264,7 +288,9 @@ class PDFSemanticChunker:
             if section_chunk_count > 1:
                 prefix_parts.append(f"[Chunk: {chunk_title}]")
             prefix = "\n".join(prefix_parts).strip()
-            enhanced_content = f"{prefix}\n\n{section_text}".strip() if prefix else section_text
+            enhanced_content = (
+                f"{prefix}\n\n{artifact_aware_text}".strip() if prefix else artifact_aware_text
+            )
             section_chunks.append(
                 DocumentChunk(
                     content=enhanced_content,
@@ -274,7 +300,7 @@ class PDFSemanticChunker:
                     metadata={
                         **section_metadata,
                         "chunk_method": "section",
-                        "raw_chunk_size": len(section_text),
+                        "raw_chunk_size": len(artifact_aware_text),
                         "chunk_title": chunk_title,
                         "retrieval_title": chunk_title,
                     },
@@ -282,7 +308,7 @@ class PDFSemanticChunker:
             )
         else:
             docs = self.fallback_splitter.split_documents(
-                [Document(page_content=section_text, metadata=section_metadata)]
+                [Document(page_content=artifact_aware_text, metadata=section_metadata)]
             )
             filtered_docs = []
             for doc_chunk in docs:
@@ -317,14 +343,275 @@ class PDFSemanticChunker:
                         },
                     )
                 )
-            return section_chunks
+            return artifact_chunks + section_chunks
 
         section_chunk_count = len(section_chunks)
         for idx, chunk in enumerate(section_chunks):
             chunk.index = idx
             chunk.metadata["section_chunk_index"] = idx
             chunk.metadata["section_chunk_count"] = section_chunk_count
-        return section_chunks
+        return artifact_chunks + section_chunks
+
+    def _extract_caption(self, artifact_type: str, lines: List[str], start_idx: int) -> str:
+        current = lines[start_idx].strip() if 0 <= start_idx < len(lines) else ""
+        window = lines[start_idx : min(len(lines), start_idx + 3)]
+        caption_re = re.compile(
+            r"^\s*(table|fig(?:ure)?|algorithm)\s*[\.:]?\s*\d+[\w\.\-: ]*",
+            re.IGNORECASE,
+        )
+        for line in window:
+            candidate = line.strip()
+            if not candidate:
+                continue
+            if caption_re.match(candidate):
+                return candidate[:160]
+        if artifact_type == "figure":
+            for line in window:
+                candidate = line.strip()
+                if candidate.lower().startswith(("fig.", "figure")):
+                    return candidate[:160]
+        if current:
+            return current[:120]
+        defaults = {
+            "table": "Table artifact",
+            "figure": "Figure artifact",
+            "algorithm": "Algorithm artifact",
+        }
+        return defaults.get(artifact_type, "Artifact")
+
+    def _extract_artifacts(self, section_text: str) -> List[ArtifactCandidate]:
+        lines = section_text.splitlines()
+        artifacts: List[ArtifactCandidate] = []
+        used = [False] * len(lines)
+
+        def mark_used(start: int, end: int) -> None:
+            for i in range(start, end + 1):
+                if 0 <= i < len(used):
+                    used[i] = True
+
+        # Table blocks
+        i = 0
+        while i < len(lines):
+            if used[i]:
+                i += 1
+                continue
+            if "|" in lines[i] and i + 1 < len(lines) and re.search(r"\|\s*:?-{3,}", lines[i + 1]):
+                start = i
+                j = i + 2
+                while j < len(lines) and "|" in lines[j].strip():
+                    j += 1
+                end = j - 1
+                block = "\n".join(lines[start : end + 1]).strip()
+                if block:
+                    artifacts.append(
+                        ArtifactCandidate(
+                            artifact_type="table",
+                            start_line_idx=start,
+                            end_line_idx=end,
+                            caption=self._extract_caption("table", lines, max(0, start - 1)),
+                            content=block,
+                        )
+                    )
+                    mark_used(start, end)
+                i = j
+                continue
+            i += 1
+
+        # Figure blocks
+        for idx, line in enumerate(lines):
+            if used[idx]:
+                continue
+            stripped = line.strip()
+            if (
+                "<!-- image -->" in stripped.lower()
+                or stripped.startswith("![")
+                or re.match(r"^\s*(fig\.|figure)\s*\d+", stripped, re.IGNORECASE)
+            ):
+                start = idx
+                end = idx
+                if "<!-- image -->" in stripped.lower() or stripped.startswith("!["):
+                    next_idx = idx + 1
+                    if next_idx < len(lines) and not lines[next_idx].strip():
+                        next_idx += 1
+                    if next_idx < len(lines) and re.match(
+                        r"^\s*(fig\.|figure)\s*\d+", lines[next_idx].strip(), re.IGNORECASE
+                    ):
+                        end = next_idx
+                elif idx + 1 < len(lines) and re.match(
+                    r"^\s*(fig\.|figure)\s*\d+", lines[idx + 1].strip(), re.IGNORECASE
+                ):
+                    end = idx + 1
+                block = "\n".join(lines[start : end + 1]).strip()
+                if block:
+                    artifacts.append(
+                        ArtifactCandidate(
+                            artifact_type="figure",
+                            start_line_idx=start,
+                            end_line_idx=end,
+                            caption=self._extract_caption("figure", lines, start),
+                            content=block,
+                        )
+                    )
+                    mark_used(start, end)
+
+        # Algorithm blocks
+        strong_algo_trigger = re.compile(r"(algorithm\s*\d+|pseudo-?code)", re.IGNORECASE)
+        io_signal = re.compile(r"^\s*(input|output)\s*:", re.IGNORECASE)
+        step_signal = re.compile(
+            r"^\s*(step\s*\d+[:\.\)]|(\d+[\.\)]\s+\S+)|([ivxlcdm]+[\.\)]\s+\S+))",
+            re.IGNORECASE,
+        )
+
+        def build_algorithm_block(start: int) -> ArtifactCandidate:
+            j = start + 1
+            while j < len(lines):
+                next_line = lines[j].strip()
+                if not next_line:
+                    break
+                if re.match(r"^#{1,6}\s+", next_line):
+                    break
+                if re.search(r"\|\s*:?-{3,}", next_line):
+                    break
+                if next_line.startswith("![") or "<!-- image -->" in next_line.lower():
+                    break
+                j += 1
+            end = max(start, j - 1)
+            block = "\n".join(lines[start : end + 1]).strip()
+            return ArtifactCandidate(
+                artifact_type="algorithm",
+                start_line_idx=start,
+                end_line_idx=end,
+                caption=self._extract_caption("algorithm", lines, start),
+                content=block,
+            )
+
+        # Strong trigger: Algorithm N / Pseudocode
+        for idx, line in enumerate(lines):
+            if used[idx]:
+                continue
+            if strong_algo_trigger.search(line):
+                candidate = build_algorithm_block(idx)
+                if candidate.content:
+                    artifacts.append(candidate)
+                    mark_used(candidate.start_line_idx, candidate.end_line_idx)
+
+        # Weak trigger requires BOTH IO clues and step-like structure within a local window
+        window_size = 8
+        for start in range(len(lines)):
+            if used[start]:
+                continue
+            end = min(len(lines), start + window_size)
+            window_lines = lines[start:end]
+            io_count = sum(1 for ln in window_lines if io_signal.search(ln.strip()))
+            step_count = sum(1 for ln in window_lines if step_signal.search(ln.strip()))
+            if io_count >= 1 and step_count >= 2:
+                first_signal = None
+                for idx in range(start, end):
+                    if used[idx]:
+                        continue
+                    striped = lines[idx].strip()
+                    if io_signal.search(striped) or step_signal.search(striped):
+                        first_signal = idx
+                        break
+                if first_signal is None:
+                    continue
+                candidate = build_algorithm_block(first_signal)
+                if candidate.content:
+                    artifacts.append(candidate)
+                    mark_used(candidate.start_line_idx, candidate.end_line_idx)
+
+        artifacts.sort(key=lambda item: item.start_line_idx)
+        return artifacts
+
+    def _make_context(self, text: str, max_chars: int = 300) -> str:
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if not normalized:
+            return ""
+        if len(normalized) <= max_chars:
+            return normalized
+        return normalized[:max_chars].rstrip() + "..."
+
+    def _build_artifact_chunks(
+        self,
+        section: MarkdownSection,
+        section_metadata: Dict[str, Any],
+        artifact_candidates: List[ArtifactCandidate],
+        artifact_index_start: int,
+    ) -> List[DocumentChunk]:
+        lines = section.content.splitlines()
+        chunks: List[DocumentChunk] = []
+        label_map = {"table": "Table", "figure": "Figure", "algorithm": "Algorithm"}
+        method_map = {
+            "table": "artifact_table",
+            "figure": "artifact_figure",
+            "algorithm": "artifact_algorithm",
+        }
+        for local_idx, artifact in enumerate(artifact_candidates):
+            before_text = "\n".join(lines[max(0, artifact.start_line_idx - 3) : artifact.start_line_idx])
+            after_text = "\n".join(
+                lines[artifact.end_line_idx + 1 : min(len(lines), artifact.end_line_idx + 4)]
+            )
+            context_before = self._make_context(before_text, max_chars=300)
+            context_after = self._make_context(after_text, max_chars=300)
+            section_path_text = " > ".join(section.path).strip()
+            header = (
+                f"[Artifact: {label_map.get(artifact.artifact_type, 'Artifact')}]\n"
+                f"[Section: {section_path_text or section.title}]\n"
+                f"[Caption: {artifact.caption}]"
+            )
+            body = (
+                f"{header}\n\n"
+                f"Context before:\n{context_before or '[None]'}\n\n"
+                f"Artifact content:\n{artifact.content}\n\n"
+                f"Context after:\n{context_after or '[None]'}"
+            )
+            global_artifact_index = artifact_index_start + local_idx
+            chunks.append(
+                DocumentChunk(
+                    content=body.strip(),
+                    index=local_idx,
+                    start_char=0,
+                    end_char=len(body),
+                    metadata={
+                        **section_metadata,
+                        "content_type": "artifact",
+                        "artifact_type": artifact.artifact_type,
+                        "chunk_method": method_map.get(artifact.artifact_type, "artifact"),
+                        "artifact_index": global_artifact_index,
+                        "caption": artifact.caption,
+                        "artifact_start_line": section.start_line + artifact.start_line_idx,
+                        "artifact_end_line": section.start_line + artifact.end_line_idx,
+                        "context_before": context_before,
+                        "context_after": context_after,
+                        "retrieval_title": artifact.caption,
+                        "raw_chunk_size": len(artifact.content),
+                    },
+                )
+            )
+        return chunks
+
+    def _replace_artifacts_with_placeholders(
+        self,
+        section_text: str,
+        artifact_candidates: List[ArtifactCandidate],
+    ) -> str:
+        lines = section_text.splitlines()
+        if not artifact_candidates:
+            return section_text
+        artifact_map = {a.start_line_idx: a for a in artifact_candidates}
+        skip_until = -1
+        output: List[str] = []
+        for i, line in enumerate(lines):
+            if i <= skip_until:
+                continue
+            artifact = artifact_map.get(i)
+            if artifact:
+                label = artifact.artifact_type.capitalize()
+                output.append(f"[{label} omitted. See artifact chunk: {artifact.caption}]")
+                skip_until = artifact.end_line_idx
+            else:
+                output.append(line)
+        return "\n".join(output)
 
     def chunk_content(
         self,
@@ -347,15 +634,19 @@ class PDFSemanticChunker:
             sections = self._split_markdown_sections(content)
             if sections:
                 final_chunks: List[DocumentChunk] = []
+                artifact_index = 0
                 for section in sections:
-                    final_chunks.extend(
-                        self._chunk_section(
-                            section=section,
-                            base_metadata=base_metadata,
-                            title=title,
-                            source=source,
-                        )
+                    section_chunks = self._chunk_section(
+                        section=section,
+                        base_metadata=base_metadata,
+                        title=title,
+                        source=source,
+                        artifact_index_start=artifact_index,
                     )
+                    artifact_index += sum(
+                        1 for c in section_chunks if c.metadata.get("content_type") == "artifact"
+                    )
+                    final_chunks.extend(section_chunks)
                 if final_chunks:
                     total_chunks = len(final_chunks)
                     for idx, chunk in enumerate(final_chunks):

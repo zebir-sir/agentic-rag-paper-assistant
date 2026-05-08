@@ -761,6 +761,123 @@ async def section_search(
             )
         return out
 
+
+async def artifact_search(
+    embedding: List[float],
+    query_text: str,
+    limit: int = 10,
+    artifact_types: Optional[List[str]] = None,
+    document_id: Optional[str] = None,
+    text_weight: float = 0.3,
+) -> List[Dict[str, Any]]:
+    """
+    Search only artifact chunks (table/figure/algorithm) with vector + text relevance.
+    """
+    async with db_pool.acquire() as conn:
+        safe_limit = max(1, min(int(limit or 10), 50))
+        safe_text_weight = max(0.0, min(float(text_weight or 0.0), 1.0))
+        vector_weight = 1.0 - safe_text_weight
+        query_value = str(query_text or "").strip()
+        embedding_str = "[" + ",".join(map(str, embedding)) + "]"
+
+        conditions: List[str] = [
+            "COALESCE(c.metadata->>'content_type', '') = 'artifact'",
+        ]
+        params: List[Any] = [embedding_str, query_value]
+        idx = 3
+
+        normalized_types = []
+        for t in (artifact_types or []):
+            value = str(t or "").strip().lower()
+            if value in {"table", "figure", "algorithm"}:
+                normalized_types.append(value)
+        if normalized_types:
+            conditions.append(f"LOWER(COALESCE(c.metadata->>'artifact_type','')) = ANY(${idx}::text[])")
+            params.append(normalized_types)
+            idx += 1
+
+        if document_id:
+            conditions.append(f"d.id = ${idx}::uuid")
+            params.append(document_id)
+            idx += 1
+
+        where_sql = " AND ".join(conditions)
+        sql = f"""
+            SELECT
+                c.id::text AS chunk_id,
+                c.document_id::text AS document_id,
+                c.content AS content,
+                (
+                    ({vector_weight}::float8 * GREATEST(0.0, LEAST(1.0, 1.0 - (c.embedding <=> $1::vector))))
+                    +
+                    ({safe_text_weight}::float8 * GREATEST(
+                        ts_rank_cd(
+                            setweight(to_tsvector('simple', COALESCE(c.content, '')), 'B')
+                            ||
+                            setweight(to_tsvector('simple', COALESCE(c.metadata->>'caption', '')), 'A')
+                            ||
+                            setweight(to_tsvector('simple', COALESCE(c.metadata->>'retrieval_title', '')), 'A')
+                            ||
+                            setweight(to_tsvector('simple', COALESCE(c.metadata->>'section_path_text', '')), 'C'),
+                            plainto_tsquery('simple', $2)
+                        ),
+                        0.0
+                    ))
+                )::float8 AS combined_score,
+                GREATEST(0.0, LEAST(1.0, 1.0 - (c.embedding <=> $1::vector)))::float8 AS vector_similarity,
+                GREATEST(
+                    ts_rank_cd(
+                        setweight(to_tsvector('simple', COALESCE(c.content, '')), 'B')
+                        ||
+                        setweight(to_tsvector('simple', COALESCE(c.metadata->>'caption', '')), 'A')
+                        ||
+                        setweight(to_tsvector('simple', COALESCE(c.metadata->>'retrieval_title', '')), 'A')
+                        ||
+                        setweight(to_tsvector('simple', COALESCE(c.metadata->>'section_path_text', '')), 'C'),
+                        plainto_tsquery('simple', $2)
+                    ),
+                    0.0
+                )::float8 AS text_similarity,
+                c.metadata AS metadata,
+                d.title AS document_title,
+                d.source AS document_source
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE {where_sql}
+            ORDER BY combined_score DESC, vector_similarity DESC
+            LIMIT ${idx}
+        """
+        params.append(safe_limit)
+        rows = await conn.fetch(sql, *params)
+
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            metadata_raw = row["metadata"]
+            if isinstance(metadata_raw, str):
+                try:
+                    metadata_value = json.loads(metadata_raw)
+                except Exception:
+                    metadata_value = {}
+            elif isinstance(metadata_raw, dict):
+                metadata_value = metadata_raw
+            else:
+                metadata_value = dict(metadata_raw or {})
+
+            out.append(
+                {
+                    "chunk_id": row["chunk_id"],
+                    "document_id": row["document_id"],
+                    "content": row["content"],
+                    "combined_score": float(row["combined_score"]),
+                    "vector_similarity": float(row["vector_similarity"]),
+                    "text_similarity": float(row["text_similarity"]),
+                    "metadata": metadata_value,
+                    "document_title": row["document_title"],
+                    "document_source": row["document_source"],
+                }
+            )
+        return out
+
 # 分块管理函数
 async def get_document_chunks(document_id: str) -> List[Dict[str, Any]]:
     """

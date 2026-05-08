@@ -1,10 +1,10 @@
-﻿<div align="center">
+<div align="center">
 
 # 📚 Agentic RAG Paper Assistant
 
 **集论文知识库、学术检索、通用网页搜索与证据追踪于一体的 Agentic RAG 系统**
 
-基于 **FastAPI + Streamlit + PostgreSQL/pgvector + LangChain/LangGraph** 构建，支持 PDF 论文入库、结构化切块、章节级检索、OpenAlex 学术检索、通用网页搜索、流式问答与可追溯证据展示。
+基于 **FastAPI + Streamlit + PostgreSQL/pgvector + LangChain/LangGraph** 构建，支持 PDF 论文入库、结构化切块、章节级检索、OpenAlex 学术检索、通用网页搜索、流式问答、来源边界控制与可追溯证据展示。
 
 <br />
 
@@ -22,6 +22,7 @@
 [界面预览](#️-界面预览) ·
 [功能亮点](#-功能亮点) ·
 [系统架构](#️-系统架构) ·
+[核心工作流](#-核心工作流) ·
 [评测结果](#-评测与效果验证) ·
 [快速开始](#-快速开始) ·
 [使用示例](#-使用示例) ·
@@ -33,34 +34,36 @@
 
 ## 📌 项目简介
 
-**Agentic RAG Paper Assistant** 是一个以科研论文阅读为核心、同时支持开放域网页检索的 Agentic RAG 系统。用户可以上传 PDF 论文，系统自动完成 Docling 解析、章节感知切块、embedding 入库，并通过 Agent 工具完成论文总结、方法拆解、实验解读、创新点分析和多篇论文对比。
-本项目重点探索复杂文档场景下的多源检索、检索自我修正、章节级证据定位与可评测 RAG 工程化落地。
+**Agentic RAG Paper Assistant** 是一个以科研论文阅读为核心、同时支持开放域学术检索和网页检索的 Agentic RAG 系统。用户可以上传 PDF 论文，系统自动完成 Docling 解析、章节感知切块、embedding 入库，并通过 Agent 工具完成论文总结、方法拆解、实验解读、创新点分析和多篇论文对比。
+
+本项目重点探索复杂文档场景下的多源检索、来源契约、检索自我修正、章节级证据定位与可评测 RAG 工程化落地。
 
 📐 设计说明：[docs/DESIGN.md](docs/DESIGN.md)
 
-系统同时支持三类外部/内部知识来源：
+系统同时支持四类内部/外部知识来源：
 
-| 来源 | 作用 |
-|---|---|
-| 本地论文知识库 | 基于用户上传 PDF 的全文证据回答论文问题 |
-| OpenAlex 学术检索 | 查询知识库外论文、related work、作者、年份、DOI 和开放获取链接 |
-| 通用 Web Search | 查询普通网页资料、技术解释、最新信息和非论文来源 |
-| 模型通用知识 | 用于补充解释，但不伪装成本地论文证据 |
+| 来源 | 作用 | 边界 |
+|---|---|---|
+| 本地论文知识库 | 基于用户上传 PDF 的全文证据回答论文问题 | 适合“根据知识库 / 这篇论文 / 章节 / 实验 / 方法”等问题 |
+| OpenAlex 学术检索 | 查询知识库外论文、related work、作者、年份、DOI 和开放获取链接 | 提供学术元数据与摘要线索，不等同于本地全文证据 |
+| 通用 Web Search | 查询普通网页资料、技术解释、最新信息和非论文来源 | 依赖 provider 配置；不可用时不会用本地知识库冒充联网结果 |
+| 模型通用知识 | 用于普通解释、闲聊和无检索需求问题 | 不伪装成本地论文证据、网页证据或 OpenAlex 结果 |
 
 相比普通“向量检索 + LLM 总结”的 RAG Demo，本项目重点实现了：
 
-- **Agentic RAG 工作流**：基于 LangGraph 实现检索评估、query rewrite、retry retrieval 和证据检查。
+- **Agentic RAG 工作流**：基于 LangGraph 实现检索规划、检索评估、query rewrite、retry retrieval 和证据检查。
+- **Source-aware Intent Planner**：根据用户意图识别所需来源类型、当前可用能力和不可替代来源，生成 `source_requirements` 与 `answer_policy`。
 - **Section-aware Chunking**：按论文 Markdown 标题结构识别章节，记录章节路径、行号和章节内分片序号。
-- **Section-level Retrieval**：支持基于 `section_title / section_path_text` 的章节级过滤检索。
-- **多来源证据追踪**：区分本地论文证据、OpenAlex 学术元数据、网页来源和模型通用知识。
-- **轻量评测闭环**：提供普通检索、章节检索 A/B、多轮检索闭环三类评测脚本。
+- **Artifact-aware Retrieval**：表格、图注、算法 / 伪代码等非正文内容会被抽取为 artifact chunk，用于补充证据。
+- **Section-level Retrieval**：支持基于 `section_title / section_path_text` 的章节级过滤检索，并按原文顺序返回。
+- **多来源证据追踪**：区分本地论文证据、OpenAlex 学术元数据、网页来源和模型通用知识，避免来源混淆。
+- **轻量评测闭环**：提供普通检索、章节检索 A/B、多轮检索闭环、planner source policy 等回归测试和调试脚本。
 
-> 当前项目适合本地或私有化部署，用于展示 Agentic RAG、论文结构化检索、开放域检索接入和工程化评测能力；不是生产级多用户 SaaS 平台。
+> 当前项目适合本地或私有化部署，用于展示 Agentic RAG、论文结构化检索、来源边界控制、开放域检索接入和工程化评测能力；不是生产级多用户 SaaS 平台。
 
 ---
 
 ## 🖼️ 界面预览
-
 
 | 聊天问答 | 论文分析面板 | 章节级证据 |
 |---|---|---|
@@ -71,6 +74,7 @@
 |---|---|
 | ![深度分析](docs/assets/deep-analysis.png) | ![OpenAlex 学术检索](docs/assets/openalex-search.png) |
 | LangGraph 多轮检索与复杂问题分析 | related work、作者、年份、DOI 与来源链接 |
+
 ---
 
 ## ✨ 功能亮点
@@ -93,7 +97,17 @@
     </td>
     <td width="50%">
       <h3>🎯 章节级精准检索</h3>
-      <p>新增 <code>section_search</code> 工具，可按 <code>section_title</code> 或 <code>section_path_text</code> 过滤目标章节，并按原文顺序返回。</p>
+      <p><code>section_search</code> 可按 <code>section_title</code> 或 <code>section_path_text</code> 过滤目标章节，并按原文顺序返回。</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <h3>🧠 Source-aware Planner</h3>
+      <p>Intent Planner 不只选择工具，还会判断用户需要的来源类型、当前能力是否可用、是否允许替代，并输出回答策略。</p>
+    </td>
+    <td width="50%">
+      <h3>🧭 来源契约与透明降级</h3>
+      <p>当 Web / OpenAlex / 本地知识库等来源不可用时，系统会避免用不兼容来源冒充，并要求回答时披露能力边界。</p>
     </td>
   </tr>
   <tr>
@@ -102,21 +116,39 @@
       <p>检索不足时自动评估覆盖度、生成改写 query 并重试检索，提升复杂论文问题的召回稳定性。</p>
     </td>
     <td width="50%">
-      <h3>🔬 OpenAlex 学术检索</h3>
-      <p>用于查找知识库外论文、related work、作者、年份、DOI 和开放获取链接，可辅助扩展本地论文库。</p>
+      <h3>🧾 Artifact-aware Evidence</h3>
+      <p>表格、图注、算法 / 伪代码会被抽取为 artifact chunk，配合正文检索补充方法和实验依据。</p>
     </td>
   </tr>
   <tr>
     <td width="50%">
-      <h3>🌐 通用网页搜索</h3>
-      <p>配置 Web Search provider 后，可回答普通网页资料、技术解释、最新信息和非论文来源问题，并区分网页来源与本地论文证据。</p>
+      <h3>🔬 OpenAlex 学术检索</h3>
+      <p>用于查找知识库外论文、related work、作者、年份、DOI 和开放获取链接，可辅助扩展本地论文库。</p>
     </td>
+    <td width="50%">
+      <h3>🌐 通用网页搜索</h3>
+      <p>配置 Web Search provider 后，可回答普通网页资料、最新信息和非论文来源问题，并区分网页来源与本地论文证据。</p>
+    </td>
+  </tr>
+  <tr>
     <td width="50%">
       <h3>📍 证据来源追踪</h3>
       <p>回答下方展示本地知识库、OpenAlex 或网页来源片段，并尽量标注文档、章节、行号和分片序号。</p>
     </td>
+    <td width="50%">
+      <h3>🧪 可回归验证</h3>
+      <p>提供 retrieval eval、section eval、retrieval loop eval、planner debug 与 pytest 回归测试，便于持续验证链路。</p>
+    </td>
   </tr>
 </table>
+
+### 自动检索模式（Capability-aware Planner）
+
+- 系统默认进入自动检索模式：由 Intent Planner 自动决定是否使用本地检索、章节检索、artifact 检索、OpenAlex 或网页检索。
+- Planner 是 capability-aware 的：只会规划当前可用工具；不可用工具会被过滤并进入安全降级策略。
+- Planner 同时是 source-aware 的：会输出 `source_requirements` 与 `answer_policy`，避免把 Web、OpenAlex、本地知识库和模型知识混为一类。
+- 检索预算默认克制：每轮最多组合 2 种检索工具；若一种检索足够，不会额外扩展。
+- `artifact_search` 用于补充表格、图注、算法 / 伪代码等非正文证据，不替代通用本地检索。
 
 ---
 
@@ -129,24 +161,33 @@ flowchart LR
 
     subgraph Ingestion[PDF Ingestion Pipeline]
         PDF[PDF Files] --> Docling[Docling Parser]
-        Docling --> Chunker[Section-aware Chunking]
+        Docling --> Chunker[Section-aware + Artifact-aware Chunking]
         Chunker --> Embed[Embedding]
         Embed --> DB[(PostgreSQL + pgvector)]
     end
 
+    subgraph Planning[Source-aware Planning]
+        Planner[Intent Planner]
+        SourceReq[Source Requirements]
+        Policy[Answer Policy]
+        Planner --> SourceReq
+        SourceReq --> Policy
+    end
+
     subgraph Runtime[Agentic RAG Runtime]
         API --> Chat[Chat / Stream API]
-        Chat --> Search[Vector / Hybrid / Section Search]
+        Chat --> Planner
+        Policy --> Graph[LangGraph Workflow]
+        Graph --> Search[Vector / Hybrid / Section / Artifact Search]
         Search --> DB
-        Chat --> Graph[LangGraph Workflow]
         Graph --> Eval[Retrieval Evaluation]
         Eval --> Rewrite[Query Rewrite]
         Rewrite --> Search
         Graph --> Answer[Answer Generation]
     end
 
-    Chat --> OpenAlex[OpenAlex Academic Search]
-    Chat --> Web[General Web Search]
+    Graph --> OpenAlex[OpenAlex Academic Search]
+    Graph --> Web[General Web Search]
     Answer --> Sources[Evidence Sources]
     Sources --> UI
 ```
@@ -161,27 +202,50 @@ flowchart LR
 flowchart LR
     A[Upload PDF] --> B[Docling Markdown]
     B --> C[Section-aware Chunking]
-    C --> D[Chunk Metadata]
-    D --> E[Embedding]
-    E --> F[(PostgreSQL + pgvector)]
+    C --> D[Artifact Extraction]
+    D --> E[Chunk Metadata]
+    E --> F[Embedding]
+    F --> G[(PostgreSQL + pgvector)]
 ```
 
-### 2. Agentic RAG 问答流程
+### 2. Source-aware Agentic RAG 问答流程
 
 ```mermaid
 flowchart TD
-    Q[User Query] --> S[Scope Resolve]
+    Q[User Query] --> P[Intent Planner]
+    P --> SR[Infer Source Requirements]
+    SR --> Cap[Check Capabilities]
+    Cap --> Policy[Answer Policy]
+
+    Policy -->|Direct answer| A[Answer with Boundary]
+    Policy -->|Retrieve and answer| S[Scope Resolve]
     S --> R[Initial Retrieval]
     R --> G[Retrieval Evaluation]
-    G -->|Sufficient| A[Answer Generation]
+    G -->|Sufficient| AG[Answer Generation]
     G -->|Insufficient| W[Query Rewrite]
     W --> R2[Retry Retrieval]
     R2 --> G
-    A --> C[Evidence Check]
-    C --> F[Final Answer + Sources]
+    AG --> EC[Evidence Check]
+    EC --> F[Final Answer + Sources]
+    A --> F
 ```
 
-### 3. 章节级检索流程
+### 3. 来源契约与透明降级
+
+```mermaid
+flowchart TD
+    Q[User Query] --> Req[Required / Preferred Sources]
+    Req --> Available{Required source available?}
+    Available -->|Yes| Retrieve[Use compatible retrieval tools]
+    Available -->|Partially| Partial[Use available compatible sources]
+    Available -->|No| Disclosure[Answer with disclosure / ask clarification]
+    Partial --> Boundary[Disclose unavailable sources]
+    Disclosure --> Boundary
+    Retrieve --> Answer[Grounded Answer]
+    Boundary --> Answer
+```
+
+### 4. 章节级检索流程
 
 ```mermaid
 flowchart LR
@@ -191,23 +255,49 @@ flowchart LR
     O --> E[Evidence Snippets]
 ```
 
-### 4. 外部检索来源边界
+### 5. 外部检索来源边界
 
 ```mermaid
 flowchart TD
-    Q[User Question] --> Router[Tool Routing]
+    Q[User Question] --> Router[Source-aware Planner]
     Router -->|Uploaded papers| Local[Local Knowledge Base]
     Router -->|Papers / related work / DOI| OA[OpenAlex]
-    Router -->|Web pages / latest info / daily questions| Web[General Web Search]
+    Router -->|Web pages / latest info| Web[General Web Search]
+    Router -->|No retrieval required| Model[Model Knowledge]
     Local --> Evidence[Evidence Sources]
     OA --> Evidence
     Web --> Evidence
+    Model --> Boundary[No source claim]
     Evidence --> Answer[Grounded Answer]
+    Boundary --> Answer
 ```
 
 ---
 
-## 🧩 Section-aware Chunking
+## 🧭 Source-aware Planning
+
+Intent Planner 会把用户问题拆成三类信息：
+
+| 输出字段 | 作用 |
+|---|---|
+| `intent` | 任务类型，例如本地论文问答、章节问答、外部论文发现、网页信息、通用解释、直答等 |
+| `retrieval_steps` | 实际要调用的工具步骤，如 `hybrid_search`、`section_search`、`artifact_search`、`openalex_search`、`web_search` |
+| `source_requirements` | 用户要求或偏好的来源类型，如 `local_kb`、`local_section`、`external_academic`、`general_web`、`model_knowledge` |
+| `answer_policy` | 主回答 Agent 必须遵守的回答策略，包括允许来源、禁止来源、不可用来源和是否必须披露边界 |
+
+典型策略：
+
+| 用户问题 | 规划行为 |
+|---|---|
+| “你多大了” | `direct_answer`，不检索知识库 |
+| “总结知识库里 Hybrid-RRT 这篇论文” | 使用 `local_kb` / `local_section` 检索 |
+| “联网查一下 RRT* 最新资料” 且 Web 不可用 | 不 fallback 到本地知识库；回答时说明无法联网确认最新资料 |
+| “根据知识库论文总结 RRT*，并联网查最新资料” 且 Web 不可用 | 保留本地知识库检索，同时说明无法补充最新联网资料 |
+| “RRT* 和 Informed RRT* 有什么区别” | 可直接解释，也可使用本地知识库增强，但不能伪装成联网结果 |
+
+---
+
+## 🧩 Section-aware & Artifact-aware Chunking
 
 本项目针对论文 PDF 的结构特点，对普通 chunking 做了增强：
 
@@ -217,14 +307,17 @@ flowchart TD
     B --> C{Has Markdown Headings?}
     C -- Yes --> D[Parse Sections]
     D --> E[Split by Section]
-    E --> F{Section Too Long?}
-    F -- No --> G[section chunk]
-    F -- Yes --> H[section_recursive chunks]
-    G --> I[Write Section Metadata]
-    H --> I
-    C -- No --> J[Semantic / Recursive Fallback]
-    I --> K[Embedding + Storage]
+    E --> F[Extract Tables / Figures / Algorithms]
+    F --> G{Section Too Long?}
+    G -- No --> H[section chunk]
+    G -- Yes --> I[section_recursive chunks]
+    F --> J[artifact chunks]
+    H --> K[Write Metadata]
+    I --> K
     J --> K
+    C -- No --> L[Semantic / Recursive Fallback]
+    K --> M[Embedding + Storage]
+    L --> M
 ```
 
 每个章节感知 chunk 会保存类似 metadata：
@@ -238,6 +331,20 @@ flowchart TD
   "section_chunk_index": 1,
   "section_chunk_count": 4,
   "chunk_method": "section_recursive"
+}
+```
+
+artifact chunk 会额外保存：
+
+```json
+{
+  "content_type": "artifact",
+  "artifact_type": "algorithm",
+  "caption": "Algorithm 1 Generic Optimization Routine",
+  "artifact_start_line": 210,
+  "artifact_end_line": 228,
+  "context_before": "...",
+  "context_after": "..."
 }
 ```
 
@@ -292,12 +399,30 @@ The pseudo-code for the proposed Hybrid-RRT* framework is presented in Algorithm
 
 **解读**：LangGraph 检索闭环能够触发 query rewrite；5 个挑战问题中 60% 使用了 rewrite，平均检索轮数为 1.60。
 
+### D. Source Policy / Planner 回归
+
+| Check | Result |
+|---|---:|
+| Intent Planner tests | 28 passed |
+| Source policy container check | PASS |
+| Full pytest suite | 141 passed |
+
+覆盖场景包括：普通 direct answer、本地论文检索、Web-only 不可用时不错误 fallback、本地 + Web 混合来源请求、领域技术问题允许本地知识库增强。
+
 运行命令：
 
 ```bash
 docker compose exec api python evals/run_retrieval_eval.py --limit 5
 docker compose exec api python evals/run_section_eval.py --limit 5
 docker compose exec api python evals/run_retrieval_loop_eval.py --max-cases 5 --timeout-seconds 120 --verbose
+```
+
+Planner / Source Policy 调试命令：
+
+```bash
+docker compose exec -T api python dev_checks/debug_intent_planner.py "你多大了"
+docker compose exec -T api python dev_checks/debug_intent_planner.py "联网查一下 RRT* 最新资料" --allow-web
+docker compose exec -T api python dev_checks/debug_intent_planner.py "总结知识库里 Hybrid-RRT 这篇论文的方法流程，并说明依据来自哪些章节"
 ```
 
 结果文件：
@@ -317,7 +442,8 @@ evals/results/retrieval_loop_eval.md
 | 前端 | Streamlit |
 | 后端 | FastAPI, SSE |
 | Agent | LangChain, LangGraph, Pydantic AI |
-| 检索 | vector search, hybrid search, section_search |
+| 规划 | Intent Planner, Source-aware Answer Policy |
+| 检索 | vector search, hybrid search, section_search, artifact_search |
 | 数据库 | PostgreSQL, pgvector |
 | PDF 解析 | Docling |
 | 模型接口 | OpenAI-compatible LLM / Embedding API |
@@ -499,12 +625,24 @@ docker compose exec -e ALLOW_KB_RESET=true api python -m ingestion.ingest --docu
 ```
 
 ```text
+联网查一下 RRT* 最新资料。
+```
+
+```text
 解释 APF-RRT* 是什么，和普通 RRT* 有什么关系？
 ```
 
 ```text
 这个算法里的 exploration 和 exploitation 在采样规划中分别指什么？
 ```
+
+### 混合来源问题
+
+```text
+根据知识库论文总结 RRT* 的方法特点，并联网查一下最新资料。
+```
+
+系统会优先使用可用的本地知识库回答论文部分；如果 Web Search 不可用，会明确说明无法补充最新联网资料，而不是用本地论文冒充网页结果。
 
 ---
 
@@ -537,14 +675,18 @@ agent/
   agent.py               Pydantic AI Agent 工具注册
   agent_langchain.py     LangChain Agent 执行与流式处理
   agent_langgraph.py     LangGraph 深度分析工作流
+  intent_planner.py      意图识别、source policy、answer policy
+  planner_runtime.py     Planner steps 执行与工具过滤
   db_utils.py            PostgreSQL / pgvector 数据访问
   tools.py               检索、OpenAlex、Web Search 工具
   tool_payloads.py       工具结果转 payload 与 evidence 收集
   routing.py             问题类型识别与输出格式约束
 
+common/                  前后端共享展示工具
+
 ingestion/
   extract_files.py       Docling PDF 解析
-  chunker.py             Section-aware chunking
+  chunker.py             Section-aware / Artifact-aware chunking
   ingest.py              embedding 与 PostgreSQL 入库
 
 ui/
@@ -553,15 +695,19 @@ ui/
   components.py          来源展示、分析面板、UI 组件
   prompt_templates.py    论文分析模板
 
+dev_checks/
+  debug_intent_planner.py       Planner / full graph 调试脚本
+  check_debug_intent_planner.py 参数解析检查
+  check_history_message_clean.py 历史消息清洗检查
+
 evals/
   run_retrieval_eval.py       普通检索评测
   run_section_eval.py         章节检索 A/B 评测
   run_retrieval_loop_eval.py  多轮检索闭环评测
   results/                    评测报告输出
 
-common/                  前后端共享展示工具
 sql/                     PostgreSQL / pgvector 初始化脚本
-tests/                   测试文件
+tests/                   单元测试与回归测试
 documents/               本地论文目录，默认不提交真实 PDF
 ```
 
@@ -580,6 +726,23 @@ python -m py_compile evals/run_retrieval_eval.py evals/run_section_eval.py evals
 
 ```bash
 pytest
+```
+
+Docker 环境回归：
+
+```bash
+docker compose exec -T api python -m pytest tests/agent/test_intent_planner.py -q
+docker compose exec -T api python -m pytest tests/agent/test_agent_langgraph_retrieval_loop.py -q
+docker compose exec -T api python -m pytest tests/agent/test_ui_api_client_status.py -q
+docker compose exec -T api python -m pytest -q
+```
+
+Source Policy 调试：
+
+```bash
+docker compose exec -T api python dev_checks/debug_intent_planner.py "你多大了"
+docker compose exec -T api python dev_checks/debug_intent_planner.py "联网查一下 RRT* 最新资料" --allow-web
+docker compose exec -T api python dev_checks/debug_intent_planner.py "根据知识库论文总结 RRT*，并联网查一下最新资料" --allow-web
 ```
 
 运行评测：
@@ -601,10 +764,12 @@ docker compose exec api python evals/run_retrieval_loop_eval.py --max-cases 5 --
 - 通用网页搜索依赖第三方 provider 和 API key，默认关闭。
 - OpenAlex 主要提供论文元数据、摘要线索和开放获取链接，不等同于本地论文全文证据。
 - Web Search 结果是网页来源证据，不应与本地论文原文证据混淆。
+- Source-aware Planner 会尽量避免来源冒充，但回答质量仍依赖模型遵守 `answer_policy`。
 - 入库任务状态目前保存在 API 进程内存中，服务重启后进行中的任务状态会丢失。
 - PDF 章节识别质量依赖 Docling 输出；复杂排版可能影响 section metadata。
 - `section_search` 是基于 chunk metadata 的章节过滤检索，不等于完整文档结构解析系统。
 - 当前项目适合本地或私有化部署，不建议在无鉴权情况下直接公网开放。
+
 更多工程边界、失败场景与改进方向见 [Design Notes](docs/DESIGN.md#7-current-limitations--mitigations)。
 
 ---
@@ -612,6 +777,7 @@ docker compose exec api python evals/run_retrieval_loop_eval.py --max-cases 5 --
 ## 🗺️ 后续规划
 
 - 页码级 evidence 定位
+- 更细粒度的 source policy 评测集与跨领域问题集
 - 扩展更大的检索评测集和更多文档集验证
 - 入库任务迁移到 Redis / Celery 等持久任务队列
 - 后端 routes / services 模块拆分
@@ -619,7 +785,6 @@ docker compose exec api python evals/run_retrieval_loop_eval.py --max-cases 5 --
 - 更细粒度的章节树展示与文档结构恢复
 
 ---
-
 
 ## 📜 License
 

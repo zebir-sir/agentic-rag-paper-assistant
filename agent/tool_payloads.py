@@ -2,12 +2,14 @@ from typing import Any, Dict, List, Optional
 
 from .agent_runtime import AgentDependencies, _collect_evidence_hit
 from .tools import (
+    ArtifactSearchInput,
     DocumentInput,
     DocumentListInput,
     HybridSearchInput,
     OpenAlexSearchInput,
     SectionSearchInput,
     VectorSearchInput,
+    artifact_search_tool,
     get_document_tool,
     hybrid_search_tool,
     list_documents_tool,
@@ -172,4 +174,30 @@ async def run_section_search_payload(
         return payload
     except Exception as exc:
         _mark_retrieval_error(deps, f"section_search_failed:{type(exc).__name__}")
+        return []
+
+
+async def run_artifact_search_payload(
+    deps: AgentDependencies,
+    query: str,
+    limit: int = 10,
+    artifact_types: Optional[List[str]] = None,
+    document_id: Optional[str] = None,
+    text_weight: float = 0.3,
+) -> List[Dict[str, Any]]:
+    try:
+        results = await artifact_search_tool(
+            ArtifactSearchInput(
+                query=query,
+                limit=limit,
+                artifact_types=artifact_types,
+                document_id=document_id,
+                text_weight=text_weight,
+            )
+        )
+        payload = [chunk_result_to_payload(r) for r in results]
+        collect_hits(deps, payload)
+        return payload
+    except Exception as exc:
+        _mark_retrieval_error(deps, f"artifact_search_failed:{type(exc).__name__}")
         return []

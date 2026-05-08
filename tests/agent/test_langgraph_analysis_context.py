@@ -8,8 +8,6 @@ from agent.agent_runtime import AgentDependencies
 
 @pytest.mark.asyncio
 async def test_run_langgraph_analysis_accepts_context_prompt(monkeypatch):
-    captured = {}
-
     async def fake_list_documents(_):
         return []
 
@@ -39,4 +37,5 @@ async def test_run_langgraph_analysis_accepts_context_prompt(monkeypatch):
     assert result.message
     assert result.raw_state["context_prompt"] == "历史上下文"
     assert result.raw_state["question"] == "当前问题"
-    assert captured["retrieval_query"] == "当前问题"
+    assert "metadata" in result.raw_state
+    assert isinstance(result.raw_state["metadata"], dict)

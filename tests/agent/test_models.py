@@ -20,6 +20,7 @@ from agent.models import (
     HealthStatus,
     SearchType
 )
+from agent.tools import ArtifactSearchInput, artifact_search_tool
 
 
 class TestRequestModels:
@@ -282,3 +283,46 @@ class TestConfigurationModels:
         assert health.llm_connection is True
         assert health.version == "0.1.0"
         assert health.timestamp == now
+
+
+class TestArtifactSearchToolModels:
+    def test_artifact_search_input_limit_validation(self):
+        with pytest.raises(ValueError):
+            ArtifactSearchInput(query="q", limit=0)
+        with pytest.raises(ValueError):
+            ArtifactSearchInput(query="q", limit=51)
+        valid = ArtifactSearchInput(query="q", limit=10)
+        assert valid.limit == 10
+
+    def test_artifact_search_input_allows_empty_types(self):
+        payload = ArtifactSearchInput(query="q", artifact_types=None)
+        assert payload.artifact_types is None
+
+    @pytest.mark.asyncio
+    async def test_artifact_search_tool_converts_to_chunk_result(self, monkeypatch):
+        async def fake_embedding(_text: str):
+            return [0.1] * 8
+
+        async def fake_artifact_search(**kwargs):
+            assert kwargs["artifact_types"] == ["table", "figure", "algorithm"]
+            return [
+                {
+                    "chunk_id": "c1",
+                    "document_id": "d1",
+                    "content": "artifact row",
+                    "combined_score": 0.88,
+                    "metadata": {"artifact_type": "figure"},
+                    "document_title": "Doc 1",
+                    "document_source": "doc1.md",
+                }
+            ]
+
+        monkeypatch.setattr("agent.tools.generate_embedding", fake_embedding)
+        monkeypatch.setattr("agent.tools.artifact_search", fake_artifact_search)
+
+        results = await artifact_search_tool(ArtifactSearchInput(query="figure"))
+        assert len(results) == 1
+        assert isinstance(results[0], ChunkResult)
+        assert results[0].chunk_id == "c1"
+        assert results[0].document_id == "d1"
+        assert results[0].score == 0.88
