@@ -620,23 +620,6 @@ docker compose exec api python evals/run_retrieval_loop_eval.py --max-cases 5 --
 
 ---
 
-## 🙏 致谢
-
-本项目的初始项目结构参考了开源项目 [serkanyasr/agentic_rag_project](https://github.com/serkanyasr/agentic_rag_project)，该项目基于 MIT License 发布。
-
-在此基础上，本项目围绕科研论文阅读和可追溯问答场景进行了重构与扩展，包括：
-
-- LangChain / LangGraph Agent 工作流
-- 会话历史与长对话摘要压缩
-- OpenAlex 学术检索与可选通用网页搜索
-- 前端 PDF 上传入库、进度展示与取消任务
-- section-aware chunking 与章节级检索
-- evidence source 展示与章节级证据追踪
-- 轻量检索评测与章节检索 A/B 验证
-
-原项目的 MIT License 与版权声明已保留。
-
----
 
 ## 📜 License
 
