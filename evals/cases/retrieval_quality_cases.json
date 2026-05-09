@@ -1,0 +1,8 @@
+[
+  {"id":"rq_001","question":"总结 Hybrid-RRT 方法核心思想","expected_document_keywords":["Hybrid-RRT"],"expected_section_keywords":["method"],"expected_artifact_types":[],"expected_content_keywords":["hybrid","rrt","method"],"retrieval_modes_to_compare":["hybrid","section"]},
+  {"id":"rq_002","question":"只看 Abstract，概括贡献","expected_document_keywords":["Hybrid-RRT"],"expected_section_keywords":["abstract"],"expected_artifact_types":[],"expected_content_keywords":["contribution","abstract"],"retrieval_modes_to_compare":["hybrid","section"]},
+  {"id":"rq_003","scenario":"known_document_section","expected_tool":"section","question":"实验结果中有哪些指标","expected_document_keywords":["HMA-RRT"],"expected_section_keywords":["experiment","result"],"expected_artifact_types":["table"],"expected_content_keywords":["metric","result"],"retrieval_modes_to_compare":["hybrid","section","artifact"]},
+  {"id":"rq_004","question":"解释论文中的算法流程","expected_document_keywords":["HA-RRT"],"expected_section_keywords":["algorithm","method"],"expected_artifact_types":["algorithm"],"expected_content_keywords":["step","algorithm"],"retrieval_modes_to_compare":["hybrid","artifact"]},
+  {"id":"rq_005","scenario":"artifact_known_document","expected_tool":"artifact","question":"图示的 pipeline 体现了什么","expected_document_keywords":["Hybrid-RRT"],"expected_section_keywords":["figure"],"expected_artifact_types":["figure"],"expected_content_keywords":["pipeline"],"retrieval_modes_to_compare":["hybrid","artifact"]},
+  {"id":"rq_006","question":"对比 HA-RRT 与 HMA-RRT 的方法差异","expected_document_keywords":["HA-RRT","HMA-RRT"],"expected_section_keywords":["method"],"expected_artifact_types":[],"expected_content_keywords":["difference","method"],"retrieval_modes_to_compare":["hybrid","section"]}
+]

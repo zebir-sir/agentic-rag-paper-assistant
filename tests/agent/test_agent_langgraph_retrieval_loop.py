@@ -4,7 +4,9 @@ from agent.agent_langgraph import (
     _build_planner_capabilities,
     _build_runtime_decision_summary,
     _apply_scope_policy_to_hits,
+    _summarize_retrieval_results,
     clean_legacy_warning_text,
+    format_retrieval_results_for_generation,
     _humanize_warning,
     evidence_check_node,
     finalize_node,
@@ -26,6 +28,16 @@ from agent.agent_langgraph import (
 )
 from agent.agent_runtime import AgentDependencies
 from agent.models import EvidenceSource
+
+
+def _progress_texts(progress_messages):
+    texts = []
+    for item in progress_messages:
+        if isinstance(item, dict):
+            texts.append(str(item.get("content") or ""))
+        else:
+            texts.append(str(item))
+    return texts
 
 
 def test_grade_empty_results_insufficient():
@@ -84,6 +96,102 @@ def test_dedupe_retrieval_hits():
     ]
     deduped = dedupe_retrieval_hits(hits)
     assert len(deduped) == 2
+
+
+def test_generation_formatter_truncates_plain_chunk():
+    result = format_retrieval_results_for_generation(
+        [
+            {
+                "chunk_id": "c1",
+                "document_title": "Doc A",
+                "score": 0.88,
+                "content": "A" * 1200,
+                "metadata": {"content_type": "text", "section_path_text": "Method"},
+            }
+        ]
+    )
+    assert "[Evidence 1]" in result
+    assert "document_title: Doc A" in result
+    assert "section: Method" in result
+    assert "artifact_type: N/A" in result
+    assert "...[truncated]" in result
+    assert len(result) < 1600
+
+
+def test_generation_formatter_keeps_table_header_and_rows():
+    table = (
+        "| Algorithm | Environment | Parameter | Mean | Improvement |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| A | Sim | p1 | 0.83 | 12% |\n"
+        "| B | Sim | p2 | 0.91 | 18% |\n"
+        "| C | Field | p3 | 0.95 | 24% |\n"
+    )
+    result = format_retrieval_results_for_generation(
+        [
+            {
+                "chunk_id": "tbl-1",
+                "document_title": "Benchmark Paper",
+                "score": 0.93,
+                "content": table,
+                "metadata": {
+                    "content_type": "artifact",
+                    "artifact_type": "table",
+                    "caption": "Main quantitative comparison.",
+                    "section_path_text": "Results > Main Table",
+                },
+            }
+        ]
+    )
+    assert "artifact_type: table" in result
+    assert "caption: Main quantitative comparison." in result
+    assert "section: Results > Main Table" in result
+    assert "| Algorithm | Environment | Parameter | Mean | Improvement |" in result
+    assert "| A | Sim | p1 | 0.83 | 12% |" in result
+    assert "| B | Sim | p2 | 0.91 | 18% |" in result
+
+
+def test_generation_formatter_keeps_algorithm_body_not_only_caption():
+    algorithm_text = (
+        "Algorithm 1: Planner\n"
+        "1. Initialize frontier.\n"
+        "2. Expand candidate nodes.\n"
+        "3. Re-score with heuristic.\n"
+        "4. Return best trajectory.\n"
+    )
+    result = format_retrieval_results_for_generation(
+        [
+            {
+                "chunk_id": "alg-1",
+                "document_title": "Planner Paper",
+                "score": 0.89,
+                "content": algorithm_text,
+                "metadata": {
+                    "content_type": "artifact",
+                    "artifact_type": "algorithm",
+                    "caption": "Pseudo-code of the planning loop.",
+                    "section_path_text": "Method > Algorithm",
+                },
+            }
+        ]
+    )
+    assert "artifact_type: algorithm" in result
+    assert "caption: Pseudo-code of the planning loop." in result
+    assert "Initialize frontier." in result
+    assert "Return best trajectory." in result
+
+
+def test_short_retrieval_summary_logic_stays_compact():
+    result = _summarize_retrieval_results(
+        [
+            {
+                "document_title": "Doc",
+                "score": 0.7,
+                "content": "B" * 500,
+            }
+        ]
+    )
+    assert "snippet=" in result
+    assert len(result) < 320
 
 
 def test_route_before_max_attempts_goes_rewrite():
@@ -651,12 +759,13 @@ async def test_direct_answer_progress_does_not_emit_retrieval_round(monkeypatch)
         "progress_callback": progress_callback,
     }
     await local_retrieval_node(state)
-    joined = "\n".join(progress_messages)
-    assert "正在规划回答..." in joined
-    assert "已判断本轮可直接回答，跳过本地检索。" in joined
+    joined = "\n".join(_progress_texts(progress_messages))
+    assert "正在理解问题，并判断需要哪些论文证据..." in joined
+    assert "正在检查证据是否足够回答问题..." in joined
     assert "Local retrieval round" not in joined
     assert "Retrieval round" not in joined
     assert "正在执行第 1 轮检索" not in joined
+    assert any(isinstance(item, dict) and item.get("phase") == "planning" for item in progress_messages)
 
 
 @pytest.mark.asyncio
@@ -721,12 +830,13 @@ async def test_retrieval_progress_uses_chinese_status(monkeypatch):
         "progress_callback": progress_callback,
     }
     await local_retrieval_node(state)
-    joined = "\n".join(progress_messages)
-    assert "正在规划回答..." in joined
-    assert "正在执行第 1 轮检索..." in joined
-    assert "第 1 轮检索完成" in joined
+    joined = "\n".join(_progress_texts(progress_messages))
+    assert "正在理解问题，并判断需要哪些论文证据..." in joined
+    assert "正在检索相关章节内容..." in joined
+    assert "正在检查证据是否足够回答问题..." in joined
     assert "Local retrieval round" not in joined
     assert "Retrieval round" not in joined
+    assert any(isinstance(item, dict) and item.get("phase") == "retrieval" for item in progress_messages)
 
 
 @pytest.mark.asyncio
@@ -856,6 +966,72 @@ async def test_generate_analysis_prompt_includes_runtime_decision_summary(monkey
     assert out["draft_answer"] == "ok"
     assert "运行决策摘要" in captured["prompt"]
     assert "planner 主动跳过检索并允许 direct answer" in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_generate_analysis_prompt_uses_generation_formatter_for_table_artifact(monkeypatch):
+    captured = {"prompt": ""}
+    table = (
+        "| Algorithm | Environment | Parameter | Mean | Improvement |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| H1 | Lab | p1 | 0.81 | 10% |\n"
+        "| H2 | Mars | p2 | 0.92 | 17% |\n"
+    )
+
+    class DummyModel:
+        async def ainvoke(self, messages):
+            captured["prompt"] = messages[1]["content"]
+            return type("Resp", (), {"content": "ok"})()
+
+    monkeypatch.setattr("agent.agent_langgraph.get_langchain_chat_model", lambda: DummyModel())
+    state = {
+        "question": "请根据表格解释指标对比",
+        "context_prompt": "",
+        "documents": [{"id": "d1", "title": "Benchmark Paper", "source": "paper.pdf"}],
+        "retrieval_results": [
+            {
+                "chunk_id": "tbl-2",
+                "document_title": "Benchmark Paper",
+                "score": 0.95,
+                "content": table,
+                "metadata": {
+                    "content_type": "artifact",
+                    "artifact_type": "table",
+                    "caption": "Main comparison table.",
+                    "section_path_text": "Results > Tables",
+                },
+            }
+        ],
+        "warnings": [],
+        "retrieval_attempts": [],
+        "rewritten_queries": [],
+        "retrieval_evaluation": {},
+        "answer_scope": {},
+        "scope_policy": "broad_kb",
+        "metadata": {
+            "planner_decision": {
+                "intent": "local_artifact_qa",
+                "needs_retrieval": True,
+                "direct_answer_allowed": False,
+                "planned_tools": ["artifact_search"],
+                "reason": "Need local artifact evidence.",
+                "evidence_policy": "answer_with_available_evidence_and_state_uncertainty",
+            },
+            "retrieval_skipped_by_planner": False,
+            "direct_answer_allowed": False,
+            "retrieval_sufficient": True,
+            "retrieval_insufficient_reason": None,
+            "tools_executed": ["artifact_search"],
+        },
+    }
+    out = await generate_analysis_node(state)
+    assert out["draft_answer"] == "ok"
+    assert "检索证据：" in captured["prompt"]
+    assert "检索结果（最多3条）" not in captured["prompt"]
+    assert "[Evidence 1]" in captured["prompt"]
+    assert "artifact_type: table" in captured["prompt"]
+    assert "| Algorithm | Environment | Parameter | Mean | Improvement |" in captured["prompt"]
+    assert "不得因为 UI snippet 或 caption 不完整而声称表格数据缺失" in captured["prompt"]
 
 
 @pytest.mark.asyncio

@@ -40,3 +40,23 @@ Thumbs.db
 .tmp/
 
 test_logs/
+
+# Local documents / retry workspace
+documents_retry/
+documents/
+*.pdf
+
+# Eval raw outputs
+evals/results/*.json
+evals/results/answer_groundedness_eval.md
+
+# Local logs / cache
+test_logs/
+*.log
+__pycache__/
+.pytest_cache/
+.venv/
+.uv-cache/
+.env
+.env.*
+!.env.example

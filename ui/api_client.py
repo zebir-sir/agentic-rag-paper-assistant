@@ -29,6 +29,11 @@ def ensure_chat_state() -> None:
         "search_type": "hybrid",
         "is_streaming": False,
         "stop_requested": False,
+        "stop_button_visible": False,
+        "cancel_requested": False,
+        "cancel_status": "",
+        "current_run_id": None,
+        "cancelled_by_user": False,
     }
     for key, default in defaults.items():
         if key not in st.session_state:
@@ -160,6 +165,20 @@ def fetch_session_messages(base_url: str, session_id: str) -> List[Dict[str, Any
         return []
 
 
+def delete_session(base_url: str, session_id: str) -> tuple[bool, str]:
+    try:
+        resp = requests.delete(f"{base_url}/sessions/{session_id}", timeout=10)
+        if resp.status_code == 200:
+            return True, "会话已删除"
+        try:
+            detail = (resp.json() or {}).get("detail")
+        except Exception:
+            detail = resp.text
+        return False, f"删除会话失败：{detail}"
+    except Exception as e:
+        return False, f"删除会话失败：{e}"
+
+
 
 def upload_pdf_to_kb(base_url: str, filename: str, file_bytes: bytes, fast: bool = True) -> tuple[bool, str, Dict[str, Any]]:
     try:
@@ -258,6 +277,22 @@ def add_openalex_source_to_kb(base_url: str, source: Dict[str, Any]) -> tuple[bo
         return False, f"加入失败：{e}"
 
 
+def cancel_chat_stream(base_url: str, run_id: str) -> tuple[bool, str, Dict[str, Any]]:
+    if not str(run_id or "").strip():
+        return False, "run_id 为空", {}
+    try:
+        resp = requests.post(f"{base_url}/chat/stream/{run_id}/cancel", timeout=5)
+        payload = resp.json() if resp.status_code == 200 else {}
+        status = str(payload.get("status") or "")
+        if resp.status_code == 200:
+            if status in {"cancelled", "already_finished", "not_found"}:
+                return True, status, payload
+            return True, "not_found", payload
+        return False, f"HTTP {resp.status_code}", payload
+    except Exception as e:
+        return False, str(e), {}
+
+
 def iter_chat_stream_events(base_url: str, request_data: Dict[str, Any]):
     buffer = ""
     with requests.post(
@@ -296,6 +331,33 @@ def iter_chat_stream_events(base_url: str, request_data: Dict[str, Any]):
                         continue
 
 
+def build_chat_request_data(
+    message: str,
+    search_type: str,
+    use_web_search: bool,
+    use_react: bool,
+    user_id: str,
+    allow_web_search: bool = False,
+    allow_openalex_search: bool = False,
+    metadata: Optional[Dict[str, Any]] = None,
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    request_metadata: Dict[str, Any] = dict(metadata or {})
+    request_metadata.update({
+        "allow_web_search": bool(allow_web_search),
+        "allow_openalex_search": bool(allow_openalex_search),
+    })
+    return {
+        "message": message,
+        "session_id": session_id,
+        "user_id": user_id,
+        "search_type": search_type,
+        "use_web_search": use_web_search,
+        "use_react": use_react,
+        "metadata": request_metadata,
+    }
+
+
 def stream_chat(
     message: str,
     base_url: str,
@@ -309,20 +371,17 @@ def stream_chat(
     **_: Any,
 ):
     ensure_chat_state()
-    request_metadata: Dict[str, Any] = dict(metadata or {})
-    request_metadata.update({
-        "allow_web_search": bool(allow_web_search),
-        "allow_openalex_search": bool(allow_openalex_search),
-    })
-    request_data = {
-        "message": message,
-        "session_id": st.session_state.active_session_id,
-        "user_id": user_id,
-        "search_type": search_type,
-        "use_web_search": use_web_search,
-        "use_react": use_react,
-        "metadata": request_metadata,
-    }
+    request_data = build_chat_request_data(
+        message=message,
+        search_type=search_type,
+        use_web_search=use_web_search,
+        use_react=use_react,
+        user_id=user_id,
+        allow_web_search=allow_web_search,
+        allow_openalex_search=allow_openalex_search,
+        metadata=metadata,
+        session_id=st.session_state.active_session_id,
+    )
     status_box = st.empty()
     response_box = st.empty()
     sources_box = st.empty()
@@ -331,6 +390,12 @@ def stream_chat(
     status_box.info("正在连接后端流式接口...")
     st.session_state.is_streaming = True
     st.session_state.stop_requested = False
+    st.session_state.stop_button_visible = True
+    st.session_state.cancel_requested = False
+    st.session_state.cancel_status = ""
+    st.session_state.current_run_id = None
+    st.session_state.cancelled_by_user = False
+    st.session_state.stream_loop_exit_reason = ""
 
     full_response = ""
     current_sources: List[Dict[str, Any]] = []
@@ -342,13 +407,28 @@ def stream_chat(
         with stop_box.container():
             if st.button("■ 停止", type="secondary", key=f"stop_stream_fallback_{int(time.time() * 1000)}"):
                 st.session_state.stop_requested = True
+                st.session_state.cancel_requested = True
+                st.session_state.stop_button_visible = False
+                st.session_state.cancel_status = "已停止生成"
         for data in iter_chat_stream_events(base_url, request_data):
             if bool(st.session_state.get("stop_requested")):
                 stopped_by_user = True
+                st.session_state.stop_button_visible = False
+                st.session_state.cancel_requested = True
+                st.session_state.cancelled_by_user = True
+                st.session_state.stream_loop_exit_reason = "stream loop exited by user stop"
+                run_id = str(st.session_state.get("current_run_id") or "")
+                if run_id:
+                    ok, cancel_state, _ = cancel_chat_stream(base_url, run_id)
+                    if ok and cancel_state in {"cancelled", "already_finished", "not_found"}:
+                        st.session_state.cancel_status = "已停止生成"
+                    else:
+                        st.session_state.cancel_status = "已停止生成"
                 break
             dtype = data.get("type")
             if dtype == "session":
                 st.session_state.active_session_id = data.get("session_id")
+                st.session_state.current_run_id = data.get("run_id")
                 status_box.info("已连接后端，正在等待回答...")
             elif dtype == "status":
                 if not should_show_status_event(data):
@@ -374,35 +454,50 @@ def stream_chat(
                 stream_error = str(data.get("content") or "流式请求失败")
                 response_box.error(stream_error)
                 break
+            elif dtype == "cancelled":
+                stopped_by_user = True
+                st.session_state.cancelled_by_user = True
+                st.session_state.cancel_status = str(data.get("message") or "已停止生成")
+                st.session_state.stream_loop_exit_reason = "stream loop exited by server cancelled event"
+                break
             elif dtype == "end":
                 break
     except Exception as e:
         stream_error = str(e)
         response_box.error(f"流式请求失败：{e}")
-
-    if full_response.strip():
-        status_box.empty()
-    stop_box.empty()
-    if full_response.strip():
-        cleaned_response = clean_assistant_display_text(full_response)
-        response_box.markdown(cleaned_response)
-        full_response = cleaned_response
-    elif stopped_by_user:
-        response_box.info("已停止继续生成，已保留当前输出内容。")
-    elif not stream_error:
-        response_box.info("本轮没有收到有效回答，请稍后重试。")
-    ensure_chat_state()
-    if full_response.strip():
-        metadata: Dict[str, Any] = {"sources": current_sources}
-        if stopped_by_user:
-            metadata["stopped_by_user"] = True
-        if stream_error:
-            metadata["stream_error"] = stream_error
-        st.session_state.messages.append(
-            {"role": "assistant", "content": clean_assistant_display_text(full_response), "metadata": metadata}
-        )
-    st.session_state.restored_session_id = st.session_state.active_session_id
-    st.session_state.is_streaming = False
+    finally:
+        if full_response.strip():
+            status_box.empty()
+        stop_box.empty()
+        if full_response.strip():
+            cleaned_response = clean_assistant_display_text(full_response)
+            response_box.markdown(cleaned_response)
+            full_response = cleaned_response
+        elif stopped_by_user:
+            status_box.empty()
+            response_box.info("已停止生成")
+        elif not stream_error:
+            response_box.info("本轮没有收到有效回答，请稍后重试。")
+        ensure_chat_state()
+        if full_response.strip():
+            metadata: Dict[str, Any] = {"sources": current_sources}
+            if stopped_by_user:
+                metadata["stopped_by_user"] = True
+                metadata["cancelled"] = True
+                metadata["cancelled_by_user"] = True
+                metadata["partial_response"] = True
+                metadata["run_id"] = st.session_state.get("current_run_id")
+            if stream_error:
+                metadata["stream_error"] = stream_error
+            st.session_state.messages.append(
+                {"role": "assistant", "content": clean_assistant_display_text(full_response), "metadata": metadata}
+            )
+        st.session_state.restored_session_id = st.session_state.active_session_id
+        st.session_state.is_streaming = False
+        st.session_state.stop_requested = False
+        st.session_state.stop_button_visible = False
+        st.session_state.cancel_requested = False
+        st.session_state.current_run_id = None
 
 
 def format_session_time(iso_value: str) -> str:

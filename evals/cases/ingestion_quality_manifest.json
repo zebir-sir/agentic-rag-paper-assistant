@@ -1,0 +1,13 @@
+﻿{
+  "suite": "ingestion_quality",
+  "description": "Validate chunk metadata coverage for section-aware and artifact-aware ingestion.",
+  "required_metadata_keys": [
+    "section_title",
+    "section_path_text",
+    "section_start_line",
+    "section_end_line",
+    "chunk_size"
+  ],
+  "artifact_types": ["table", "figure", "algorithm"],
+  "tiny_chunk_threshold": 80
+}

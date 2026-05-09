@@ -1,81 +1,73 @@
 # Evals
 
-轻量评测模块，用于验证本项目的三条核心链路：
-- 普通检索效果（Retrieval Eval）
-- 章节级检索效果（Section Eval A/B）
-- LangGraph 多轮检索闭环（Retrieval Loop Eval）
+本目录包含 **Agentic RAG Paper Assistant** 的轻量工程评测，用于验证 Agentic RAG pipeline 中的关键责任：入库质量、来源边界、检索契约、检索循环和回答忠实度。
 
-说明：这是项目级验证，不是大规模 benchmark。
+## Evaluation Suites
 
-## 文件说明
-- `retrieval_cases.json`：普通检索样例
-- `section_cases.json`：章节检索 A/B 样例
-- `retrieval_loop_cases.json`：多轮检索闭环样例
-- `run_retrieval_eval.py`：普通检索评测脚本
-- `run_section_eval.py`：章节检索 A/B 脚本
-- `run_retrieval_loop_eval.py`：多轮检索闭环脚本
-- `answer_quality_cases.md`：人工评分模板
-- `results/`：评测输出（JSON + Markdown）
+| Suite | Script | 目标 | README 定位 |
+|---|---|---|---|
+| Ingestion Integrity | `run_ingestion_quality_eval.py` | 检查 PDF 入库后的章节 metadata、行号 metadata、artifact chunks 和 chunk 质量 | 稳定指标 |
+| Source Policy | `run_source_policy_eval.py` | 检查 Planner 意图识别、来源路由、不可用工具过滤和来源越界 | 稳定指标 |
+| Retrieval Contract | `run_retrieval_quality_eval.py` | 检查检索工具是否满足特定场景契约，并保留必要 metadata | 诊断指标 |
+| Retrieval Loop Diagnostics | `run_retrieval_loop_recovery_eval.py` | 检查 rewrite / retry、cue 保留和目标文档保留情况 | 诊断指标 |
+| Answer Groundedness Audit | `run_answer_groundedness_eval.py` | 审计未支撑断言、证据差距披露和回答忠实度 | 质量门 |
 
-## 运行命令
+## 快速运行
+
 ```bash
-docker compose exec api python evals/run_retrieval_eval.py --limit 5
-docker compose exec api python evals/run_section_eval.py --limit 5
-docker compose exec api python evals/run_retrieval_loop_eval.py --max-cases 5 --timeout-seconds 120 --verbose
+python evals/run_all_evals.py --limit 3
 ```
 
-## 指标（简要）
-- `Doc Hit@K`：是否命中目标论文
-- `Section Hit@K` / `Section Precision@K`：章节命中效果
-- `Keyword Recall@K`：关键词覆盖度
-- `Order OK`：章节顺序保持
-- `Rewrite Used Rate`：闭环中 query rewrite 使用比例
-- `Avg Retrieval Attempts`：平均检索轮数
+单独运行：
 
-## 当前结果摘要
+```bash
+python evals/run_ingestion_quality_eval.py
+python evals/run_source_policy_eval.py --limit 10
+python evals/run_retrieval_quality_eval.py --limit 10
+python evals/run_retrieval_loop_recovery_eval.py --limit 5 --timeout-seconds 120
+python evals/run_answer_groundedness_eval.py --limit 5 --timeout-seconds 120
+```
 
-### Retrieval Eval (limit=5)
-| Metric | Value |
-|---|---:|
-| Total Cases | 15 |
-| Doc Hit@1 | 0.73 |
-| Doc Hit@5 | 1.00 |
-| Section Hit@5 | 0.73 |
-| Avg Keyword Recall@5 | 0.78 |
+## 适合 README 展示的稳定指标
 
-### Section Eval A/B (limit=5)
-| Metric | Section Search | Hybrid Search |
-|---|---:|---:|
-| Section Precision@5 | 0.60 | 0.42 |
-| Doc Hit@5 | 0.60 | 1.00 |
-| Keyword Recall@5 | 0.47 | 0.83 |
-| Order OK Rate | 1.00 | 0.00 |
+- 130 tests passed；
+- 3 documents / 476 chunks indexed；
+- 100% section metadata coverage；
+- 100% line metadata coverage；
+- 147 artifact chunks；
+- 当前 Source Policy eval 中 0 source-boundary violations。
 
-### Retrieval Loop Eval
-| Metric | Value |
-|---|---:|
-| Total Cases | 5 |
-| Doc Hit@K | 1.00 |
-| Avg Keyword Recall@K | 0.44 |
-| Rewrite Used Rate | 0.60 |
-| Avg Retrieval Attempts | 1.60 |
-| Avg Retrieval Confidence | 0.64 |
+## Public Metrics vs. Internal Diagnostics
 
-## 结果解读（简要）
-- `section_search` 更适合章节限定问题（如只看 Abstract/Experiments/References）。
-- `hybrid_search` 在全局命中与关键词覆盖上更强，适合开放式问答。
-- 多轮检索闭环会在部分挑战问题中触发 rewrite，提升覆盖能力。
-- 两类检索策略是互补关系，不是单向替代。
+不是所有评测结果都适合直接作为公开展示指标。
 
-## 结果文件
-- `evals/results/retrieval_eval.json`
-- `evals/results/retrieval_eval.md`
-- `evals/results/section_eval.json`
-- `evals/results/section_eval.md`
-- `evals/results/retrieval_loop_eval.json`
-- `evals/results/retrieval_loop_eval.md`
+- **Stable metrics**：适合放在 README 中展示工程质量；
+- **Diagnostics**：用于开发时检查检索或 workflow 行为；
+- **Quality gate**：用于发现回答忠实度风险，指导后续优化。
 
-## 注意事项
-- 结果依赖当前数据库中已入库论文。
-- 部分评测依赖模型与 embedding 配置。
-- Web/OpenAlex 能力受外部配置影响，不可用时会影响对应评测链路。
+这样既能让 README 保持干净，也能保留详细评测结果的可追溯性。
+
+## 输出文件
+
+典型输出：
+
+```text
+evals/results/summary.md
+evals/results/ingestion_quality_eval.md
+evals/results/source_policy_eval.md
+evals/results/retrieval_quality_eval.md
+evals/results/retrieval_loop_recovery_eval.md
+evals/results/answer_groundedness_eval.md
+```
+
+公开仓库中建议保留 `summary.md` 和稳定/诊断类 `.md` 摘要；过细的 JSON 结果可作为本地内部记录，不必公开展示。
+
+## 推荐开发流程
+
+| 修改内容 | 建议运行 |
+|---|---|
+| PDF parsing / chunking | Ingestion Integrity |
+| Planner / source routing | Source Policy |
+| Search SQL / metadata | Retrieval Contract |
+| LangGraph retrieval loop | Retrieval Loop Diagnostics |
+| Generation prompt | Answer Groundedness Audit |

@@ -102,7 +102,11 @@ def build_intent_planner_prompt(
         "If one tool is clearly sufficient, do not add a second tool.\n"
         "Prefer local tools for local paper evidence.\n"
         "section_search is for section-scoped evidence.\n"
-        "artifact_search is supplementary for non-prose artifacts (tables, figures, algorithms), not default.\n"
+        "artifact_search is appropriate when the answer depends on non-prose evidence such as tables, figures, diagrams, "
+        "algorithms, pseudocode, metric comparisons, or pipeline/process visualizations.\n"
+        "If you use artifact_search, retrieve only artifacts directly relevant to the user question.\n"
+        "Do not enumerate all artifacts by default.\n"
+        "If prose evidence or section-scoped evidence is sufficient, prefer hybrid_search or section_search.\n"
         "openalex_search is for papers outside local corpus, metadata, DOI, authors, year, related work discovery.\n"
         "web_search is for open-web or recent/non-paper information.\n"
         "Use retrieval only when the question depends on document-grounded, paper-grounded, artifact-grounded, external-source, "
@@ -131,7 +135,10 @@ def build_retry_intent_planner_prompt(
         "Goal: improve missing evidence coverage from previous retrieval.\n"
         "Plan at most 2 tools and use minimal necessary retrieval.\n"
         "Avoid repeating exactly the same tool+query unless no better option exists.\n"
-        "artifact_search is supplementary for non-prose artifacts (tables/figures/algorithms).\n"
+        "When previous retrieval is missing non-prose evidence, artifact_search can be added.\n"
+        "artifact_search should target only artifacts directly relevant to the question and missing aspects.\n"
+        "If you set artifact_types, narrow them to the relevant types instead of defaulting to all artifact types.\n"
+        "If prose or section evidence is enough, prefer hybrid_search or section_search.\n"
         "section_search is for section-focused gaps.\n"
         "Prefer local tools first; use openalex/web only when external sources are truly needed.\n"
         "Never execute tools.\n"
@@ -378,6 +385,54 @@ def _append_warning_once(warnings: List[str], warning: str) -> None:
     value = str(warning or "").strip()
     if value and value not in warnings:
         warnings.append(value)
+
+
+def infer_artifact_evidence_need(*texts: str) -> Dict[str, Any]:
+    combined = " ".join(str(text or "") for text in texts if str(text or "").strip()).lower()
+    if not combined:
+        return {"needs_artifact": False, "artifact_types": [], "reason": ""}
+
+    table_cues = (
+        "metric", "metrics", "benchmark", "score", "scores", "quantitative", "result table",
+        "comparison matrix", "performance comparison", "ablation", "numbers", "numeric",
+        "指标", "分数", "数值", "对比结果", "性能对比", "实验对比", "消融", "表格",
+    )
+    figure_cues = (
+        "figure", "fig.", "diagram", "workflow", "pipeline", "framework", "architecture",
+        "overview graphic", "visualization", "visualisation", "flow chart", "process visualization",
+        "图", "图示", "示意图", "流程图", "框架图", "架构图", "流程可视化", "pipeline",
+    )
+    algorithm_cues = (
+        "algorithm", "pseudocode", "pseudo-code", "procedure listing", "algorithm block",
+        "step list", "algorithm steps", "代码流程", "伪代码", "算法步骤", "算法流程",
+    )
+    non_prose_need_cues = (
+        "compare metrics", "metric comparison", "quantitative comparison", "performance gap",
+        "pipeline/process", "workflow breakdown", "diagrammatic", "visual evidence",
+        "算法细节", "流程细节", "图示流程", "对比指标", "定量对比", "非正文证据", "图表证据",
+    )
+
+    artifact_types: List[str] = []
+    if _contains_any_cue(combined, table_cues):
+        artifact_types.append("table")
+    if _contains_any_cue(combined, figure_cues):
+        artifact_types.append("figure")
+    if _contains_any_cue(combined, algorithm_cues):
+        artifact_types.append("algorithm")
+
+    needs_artifact = bool(artifact_types) or _contains_any_cue(combined, non_prose_need_cues)
+    if not needs_artifact:
+        return {"needs_artifact": False, "artifact_types": [], "reason": ""}
+
+    if artifact_types:
+        reason = "Question appears to depend on non-prose evidence and the artifact type can be narrowed."
+    else:
+        reason = "Question appears to depend on non-prose evidence; use relevant artifact retrieval without enumerating all artifact types."
+    return {
+        "needs_artifact": True,
+        "artifact_types": artifact_types[:2],
+        "reason": reason,
+    }
 
 
 _TOOL_SOURCE_TYPE: Dict[str, str] = {
@@ -745,6 +800,7 @@ def build_fallback_intent_plan(
     has_local_evidence_cues = _contains_any_cue(lower_question, _LOCAL_EVIDENCE_CUES)
     has_external_info_cues = _contains_any_cue(lower_question, _EXTERNAL_INFO_CUES)
     has_academic_external_cues = _contains_any_cue(lower_question, _ACADEMIC_EXTERNAL_CUES)
+    artifact_need = infer_artifact_evidence_need(normalized_question)
 
     if has_external_info_cues:
         if has_academic_external_cues and caps.openalex_search_enabled:
@@ -838,6 +894,25 @@ def build_fallback_intent_plan(
             )
 
     if has_local_evidence_cues:
+        if artifact_need["needs_artifact"] and caps.artifact_search_enabled:
+            return IntentPlan(
+                intent="local_artifact_qa",
+                needs_retrieval=True,
+                retrieval_steps=[
+                    RetrievalStep(
+                        tool="artifact_search",
+                        query=normalized_question,
+                        limit=6,
+                        artifact_types=artifact_need["artifact_types"],
+                        reason=str(artifact_need["reason"] or "Fallback local artifact retrieval for relevant non-prose evidence."),
+                    )
+                ],
+                max_tools=min(1, caps.max_tools),
+                allow_external_sources=False,
+                direct_answer_allowed=False,
+                reason=reason or "Fallback local artifact retrieval: question appears to require non-prose local evidence.",
+                warnings=["planner_fallback_used"],
+            )
         if caps.hybrid_search_enabled:
             return IntentPlan(
                 intent="local_paper_qa",
@@ -917,8 +992,9 @@ def _safe_default_plan_with_caps(question: str, capabilities: PlannerCapabilitie
 
 def _safe_retry_plan(question: str, missing_aspects: List[str], suggested_query: str = "") -> IntentPlan:
     query = str(suggested_query or "").strip() or str(question or "").strip()
-    missing_text = " ".join(str(x) for x in (missing_aspects or [])).lower()
-    if any(k in missing_text for k in ["table", "figure", "fig", "algorithm", "pseudocode"]):
+    missing_text = " ".join(str(x) for x in (missing_aspects or []))
+    artifact_need = infer_artifact_evidence_need(question, missing_text, query)
+    if artifact_need["needs_artifact"]:
         return IntentPlan(
             intent="local_artifact_qa",
             needs_retrieval=True,
@@ -927,8 +1003,8 @@ def _safe_retry_plan(question: str, missing_aspects: List[str], suggested_query:
                     tool="artifact_search",
                     query=query,
                     limit=6,
-                    artifact_types=["table", "figure", "algorithm"],
-                    reason="Fallback retry plan for potential artifact evidence gaps.",
+                    artifact_types=artifact_need["artifact_types"],
+                    reason=str(artifact_need["reason"] or "Fallback retry plan for relevant artifact evidence gaps."),
                 )
             ],
             max_tools=1,
@@ -1091,6 +1167,7 @@ def normalize_intent_plan(raw: Any, capabilities: Optional[PlannerCapabilities] 
         has_external_unavailable = any(
             tool in {"web_search", "openalex_search"} for tool in filtered_unavailable
         )
+        artifact_need = infer_artifact_evidence_need(question_for_policy or cue_text)
 
         if (
             has_external_unavailable
@@ -1109,6 +1186,20 @@ def normalize_intent_plan(raw: Any, capabilities: Optional[PlannerCapabilities] 
             )
         elif caps.direct_answer_enabled and plan.direct_answer_allowed:
             plan.needs_retrieval = False
+        elif has_local_evidence_cues and artifact_need["needs_artifact"] and caps.artifact_search_enabled:
+            plan.intent = "local_artifact_qa"
+            plan.retrieval_steps = [
+                RetrievalStep(
+                    tool="artifact_search",
+                    query="",
+                    limit=6,
+                    artifact_types=artifact_need["artifact_types"],
+                    reason=str(artifact_need["reason"] or "Fallback to relevant local artifact retrieval after tool filtering."),
+                )
+            ]
+            plan.max_tools = min(1, caps.max_tools)
+            _append_warning_once(plan.warnings, "fallback_to_artifact_after_filter")
+            plan.needs_retrieval = True
         elif caps.hybrid_search_enabled:
             plan.retrieval_steps = [RetrievalStep(tool="hybrid_search", query="", limit=10, reason="Fallback when planned tools unavailable.")]
             plan.max_tools = min(1, caps.max_tools)

@@ -1,0 +1,38 @@
+[
+  {
+    "id": "loop_001",
+    "question": "哪篇论文在 1000、5000、10000 次迭代下展示树结构演化？概括这种混合采样为什么要平衡探索和利用。",
+    "expected_document_keywords": ["Hybrid-RRT"],
+    "expected_content_keywords": ["tree", "iteration", "hybrid", "sampling"]
+  },
+  {
+    "id": "loop_002",
+    "question": "哪篇 USV 论文做过一个消融：拿掉某个采样模块后路径长度和节点数都明显变差？说明那个模块负责什么。",
+    "expected_document_keywords": ["HMA-RRT"],
+    "expected_content_keywords": ["dynamic", "sampling", "9.34%", "41.26%"]
+  },
+  {
+    "id": "loop_003",
+    "question": "只根据对比表或图注，找出哪种方法相对 Informed RRT* 提升最明显，并说明提升方向。",
+    "expected_document_keywords": ["Hybrid-RRT"],
+    "expected_content_keywords": ["Informed RRT*", "40.83%", "table", "figure"]
+  },
+  {
+    "id": "loop_004",
+    "question": "那篇强调狭窄通道单次通过能力的 USV 路径规划论文，解释它依赖哪些策略组合。",
+    "expected_document_keywords": ["HMA-RRT"],
+    "expected_content_keywords": ["narrow", "channel", "adaptive", "sampling"]
+  },
+  {
+    "id": "loop_005",
+    "question": "定位 HA-RRT 这篇 ship path planning 论文：它在哪些实验里同时比较了 time cost 和 path smoothing 效果？概括实验侧重点。",
+    "expected_document_keywords": ["HA-RRT"],
+    "expected_content_keywords": ["time cost", "path smoothing", "ship", "experiment"]
+  },
+  {
+    "id": "loop_006",
+    "question": "定位 HMA-RRT 这篇 USV 论文：它如何针对 ocean environment 使用 adaptive strategy？概括实验或方法关注点。",
+    "expected_document_keywords": ["HMA-RRT"],
+    "expected_content_keywords": ["USV", "adaptive", "ocean", "strategy"]
+  }
+]

@@ -1,6 +1,7 @@
 from agent.memory_utils import (
     MemoryState,
     build_context_without_compaction,
+    build_summary_update_prompt,
     get_messages_for_next_compaction,
     sanitize_history_messages,
     sanitize_message_for_context,
@@ -92,3 +93,33 @@ def test_get_messages_for_next_compaction_filters_debug_only_messages():
     compact_texts = [msg["content"] for msg in compact_messages]
     assert '{"tools_executed":["search_knowledge_base"]}' not in compact_texts
     assert "用户问题" in compact_texts
+
+
+def test_build_summary_update_prompt_requires_constraints_and_boundary_preservation():
+    prompt = build_summary_update_prompt(
+        old_summary="当前讨论对象：Hybrid-RRT。用户约束：只看 Abstract 与 Introduction。",
+        messages_to_compact=[
+            {
+                "role": "user",
+                "content": "只基于 Abstract 和 Introduction，不要扩展到 Results 或 Conclusion，也不要联网。",
+            }
+        ],
+    )
+    assert "用户约束" in prompt
+    assert "章节范围" in prompt
+    assert "禁止范围" in prompt
+    assert "来源限制" in prompt
+    assert "保留仍然有效的用户约束" in prompt
+    assert "若新消息明确改变讨论对象或约束，以新消息为准" in prompt
+    assert "简体中文" in prompt
+
+
+def test_build_summary_update_prompt_forbids_debug_payload_and_tool_metadata():
+    prompt = build_summary_update_prompt(
+        old_summary="",
+        messages_to_compact=[{"role": "assistant", "content": "继续分析方法流程"}],
+    )
+    assert "不要把任何 debug payload" in prompt
+    assert "raw_model_content_preview" in prompt
+    assert "tools_executed" in prompt
+    assert "intent_plan" in prompt

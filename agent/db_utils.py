@@ -367,6 +367,27 @@ async def list_recent_sessions(limit: int = 20, days: int = 7) -> List[Dict[str,
 
         return sessions
 
+
+async def delete_session(session_id: str) -> bool:
+    """Delete a session and its messages. Returns True if session existed."""
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                DELETE FROM messages
+                WHERE session_id = $1::uuid
+                """,
+                session_id,
+            )
+            result = await conn.execute(
+                """
+                DELETE FROM sessions
+                WHERE id = $1::uuid
+                """,
+                session_id,
+            )
+    return str(result).endswith(" 1")
+
 # 消息管理函数
 async def add_message(
     session_id: str,

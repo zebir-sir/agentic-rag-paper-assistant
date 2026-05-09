@@ -78,11 +78,24 @@ def _append_warning(state: LangGraphAnalysisState, warning_text: str) -> None:
     state["warnings"] = warnings
 
 
-async def _emit_progress(state: LangGraphAnalysisState, message: str) -> None:
+async def _emit_progress(
+    state: LangGraphAnalysisState,
+    message: str,
+    *,
+    phase: str = "warning",
+    user_visible: bool = True,
+) -> None:
     callback = state.get("progress_callback")
     if callback is None:
         return
-    await callback(message)
+    await callback(
+        {
+            "content": str(message or "").strip(),
+            "phase": str(phase or "warning"),
+            "user_visible": bool(user_visible),
+            "level": "info",
+        }
+    )
 
 
 def _env_int(name: str, default: int) -> int:
@@ -130,15 +143,15 @@ def _build_planner_capabilities(deps: Optional[AgentDependencies] = None) -> Pla
     )
 
 
-def clean_legacy_warning_text(text: str) -> str:
+def clean_legacy_warning_text(text: str, drop_warning: bool = False) -> str:
     value = str(text or "")
-    return value.replace(
-        "当前没有检索到直接相关片段，以下内容更适合作为一般性分析参考。",
-        "本轮没有可核对的检索片段；未被检索证据支持的结论请谨慎参考。",
-    ).replace(
-        "以下内容更适合作为一般性分析参考。",
-        "未被检索证据支持的结论请谨慎参考。",
-    )
+    legacy_full = "当前没有检索到直接相关片段，以下内容更适合作为一般性分析参考。"
+    legacy_tail = "以下内容更适合作为一般性分析参考。"
+    neutral_full = "本轮没有可核对的检索片段；未被检索证据支持的结论请谨慎参考。"
+    neutral_tail = "未被检索证据支持的结论请谨慎参考。"
+    if drop_warning:
+        return value.replace(legacy_full, "").replace(legacy_tail, "").strip()
+    return value.replace(legacy_full, neutral_full).replace(legacy_tail, neutral_tail)
 
 
 def _build_runtime_decision_summary(metadata: Dict[str, Any]) -> str:
@@ -442,7 +455,11 @@ async def resolve_answer_scope_node(state: LangGraphAnalysisState) -> LangGraphA
 
 async def inspect_documents_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState:
     next_state = dict(state)
-    await _emit_progress(next_state, "正在检查知识库文档...")
+    await _emit_progress(
+        next_state,
+        "正在定位相关论文和章节范围...",
+        phase="document_inspection",
+    )
     try:
         documents = await list_documents_tool(DocumentListInput(limit=5, offset=0))
         next_state["documents"] = [_doc_to_dict(doc) for doc in documents]
@@ -856,7 +873,11 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
     next_state["current_query"] = query
 
     limit = 3 if attempt_count == 1 else 5
-    await _emit_progress(next_state, "正在规划回答...")
+    await _emit_progress(
+        next_state,
+        "正在理解问题，并判断需要哪些论文证据...",
+        phase="planning",
+    )
 
     existing_results = list(next_state.get("retrieval_results") or [])
     attempts = list(next_state.get("retrieval_attempts") or [])
@@ -970,11 +991,44 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
                 }
             )
             next_state["retrieval_attempts"] = attempts
-            await _emit_progress(next_state, "已判断本轮可直接回答，跳过本地检索。")
-            await _emit_progress(next_state, "正在生成回答...")
+            await _emit_progress(
+                next_state,
+                "正在检查证据是否足够回答问题...",
+                phase="retrieval",
+            )
+            await _emit_progress(
+                next_state,
+                "正在基于检索到的依据组织回答...",
+                phase="generation",
+            )
             return next_state
 
-        await _emit_progress(next_state, f"正在执行第 {attempt_count} 轮检索...")
+        retrieval_query_text = f"{question} {query}".lower()
+        artifact_cues = (
+            "table",
+            "figure",
+            "algorithm",
+            "pseudo",
+            "表格",
+            "图示",
+            "图",
+            "算法",
+            "伪代码",
+            "指标",
+            "实验",
+        )
+        if any(cue in retrieval_query_text for cue in artifact_cues):
+            await _emit_progress(
+                next_state,
+                "正在补充查找相关表格、图示或算法片段...",
+                phase="retrieval",
+            )
+        else:
+            await _emit_progress(
+                next_state,
+                "正在检索相关章节内容...",
+                phase="retrieval",
+            )
         exec_out = await execute_intent_plan_steps(
             plan=plan,
             tools=tools,
@@ -1041,7 +1095,8 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
         next_state["metadata"] = metadata
         await _emit_progress(
             next_state,
-            f"第 {attempt_count} 轮检索完成，得到 {len(round_results)} 条，累计 {len(merged)} 条。",
+            "正在检查证据是否足够回答问题...",
+            phase="retrieval",
         )
     except Exception as exc:
         _append_warning(next_state, f"local retrieval failed: {exc}")
@@ -1083,7 +1138,11 @@ async def grade_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
         next_state["metadata"] = metadata
         return next_state
 
-    await _emit_progress(next_state, "正在评估检索片段是否足以回答问题...")
+    await _emit_progress(
+        next_state,
+        "正在检查证据是否足够回答问题...",
+        phase="retrieval",
+    )
     results = list(next_state.get("retrieval_results") or [])
 
     min_results = _env_int("LANGGRAPH_RETRIEVAL_MIN_RESULTS", 2)
@@ -1193,7 +1252,11 @@ async def grade_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
     next_state["metadata"] = metadata
 
     if not sufficient:
-        await _emit_progress(next_state, "检索不足，正在改写查询...")
+        await _emit_progress(
+            next_state,
+            "正在补充检索相关证据...",
+            phase="retrieval",
+        )
     return next_state
 
 
@@ -1269,6 +1332,94 @@ def _summarize_retrieval_results(results: List[Dict[str, Any]]) -> str:
         score = hit.get("score")
         lines.append(f"{idx}. {title} | score={score} | snippet={snippet}")
     return "\n".join(lines)
+
+
+def _clean_generation_content(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _truncate_generation_content(text: str, limit: int) -> str:
+    value = _clean_generation_content(text)
+    if not value:
+        return ""
+    if len(value) <= limit:
+        return value
+    return value[:limit].rstrip() + "\n...[truncated]"
+
+
+def _format_hit_content_for_generation(hit: Dict[str, Any]) -> str:
+    metadata = dict(hit.get("metadata") or {})
+    content = _clean_generation_content(hit.get("content") or "")
+    content_type = str(metadata.get("content_type") or "").strip().lower()
+    artifact_type = str(metadata.get("artifact_type") or "").strip().lower()
+    caption = _clean_generation_content(metadata.get("caption") or "")
+
+    if content_type != "artifact":
+        return _truncate_generation_content(content, 700)
+
+    if artifact_type == "table":
+        return _truncate_generation_content(content, 3200)
+
+    if artifact_type == "algorithm":
+        return _truncate_generation_content(content, 2400)
+
+    if artifact_type == "figure":
+        parts = []
+        if caption:
+            parts.append(f"Caption: {caption}")
+        context_before = _clean_generation_content(metadata.get("context_before") or "")
+        if context_before:
+            parts.append(f"Context before:\n{context_before}")
+        if content:
+            parts.append(f"Artifact content:\n{content}")
+        context_after = _clean_generation_content(metadata.get("context_after") or "")
+        if context_after:
+            parts.append(f"Context after:\n{context_after}")
+        return _truncate_generation_content("\n\n".join(parts), 1200)
+
+    parts = []
+    if caption:
+        parts.append(f"Caption: {caption}")
+    if content:
+        parts.append(content)
+    return _truncate_generation_content("\n\n".join(parts), 1800)
+
+
+def format_retrieval_results_for_generation(results: List[Dict[str, Any]]) -> str:
+    if not results:
+        return "当前未检索到可用证据。"
+
+    blocks: List[str] = []
+    for idx, hit in enumerate(results[:8], start=1):
+        metadata = dict(hit.get("metadata") or {})
+        document_title = str(hit.get("document_title") or "Untitled").strip()
+        score = hit.get("score")
+        section_path_text = str(metadata.get("section_path_text") or metadata.get("section_title") or "").strip()
+        artifact_type = str(metadata.get("artifact_type") or "").strip()
+        caption = str(metadata.get("caption") or "").strip()
+        chunk_id = str(hit.get("chunk_id") or "").strip()
+        content_type = str(metadata.get("content_type") or "").strip()
+        content = _format_hit_content_for_generation(hit)
+
+        lines = [
+            f"[Evidence {idx}]",
+            f"document_title: {document_title or 'N/A'}",
+            f"score: {score}",
+            f"section: {section_path_text or 'N/A'}",
+            f"artifact_type: {artifact_type or 'N/A'}",
+            f"caption: {caption or 'N/A'}",
+            f"chunk_id: {chunk_id or 'N/A'}",
+            f"content_type: {content_type or 'text'}",
+            "content:",
+            content or "N/A",
+        ]
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
 
 
 def _extract_response_text(response: Any) -> str:
@@ -1422,9 +1573,17 @@ async def generate_analysis_node(state: LangGraphAnalysisState) -> LangGraphAnal
     next_state = dict(state)
     metadata = dict(next_state.get("metadata") or {})
     if bool(metadata.get("retrieval_skipped_by_planner")) and bool(metadata.get("direct_answer_allowed")):
-        await _emit_progress(next_state, "正在生成回答...")
+        await _emit_progress(
+            next_state,
+            "正在基于检索到的依据组织回答...",
+            phase="generation",
+        )
     else:
-        await _emit_progress(next_state, "正在整合证据并生成最终分析...")
+        await _emit_progress(
+            next_state,
+            "正在基于检索到的依据组织回答...",
+            phase="generation",
+        )
     question = str(next_state.get("question") or "").strip()
     context_prompt = str(next_state.get("context_prompt") or "").strip()
     documents = list(next_state.get("documents") or [])
@@ -1452,7 +1611,7 @@ async def generate_analysis_node(state: LangGraphAnalysisState) -> LangGraphAnal
         f"{context_block}"
         f"用户问题：\n{question}\n\n"
         f"文档列表（最多5条）：\n{_summarize_documents(documents)}\n\n"
-        f"检索结果（最多3条）：\n{_summarize_retrieval_results(retrieval_results)}\n\n"
+        f"检索证据：\n{format_retrieval_results_for_generation(retrieval_results)}\n\n"
         f"检索尝试摘要：\n{_build_retrieval_attempts_summary(retrieval_attempts, rewritten_queries)}\n\n"
         f"运行决策摘要：\n{runtime_decision_summary}\n\n"
         f"回答范围策略：{scope_policy}\n"
@@ -1467,6 +1626,14 @@ async def generate_analysis_node(state: LangGraphAnalysisState) -> LangGraphAnal
         "如果执行过检索但证据不足，只在相关结论处说明证据边界。"
         "不要把主动跳过检索说成检索失败。"
         "不要编造论文细节，不要把推断说成论文原文结论。"
+        "具体数字、百分比、年份、作者、DOI、venue、论文标题等事实必须来自检索片段或 source metadata。"
+        "如果检索证据中包含 artifact table 或 artifact algorithm，应优先依据 content 中的原始表格/算法内容回答；"
+        "不得因为 UI snippet 或 caption 不完整而声称表格数据缺失。"
+        "不要把证据中的精确数字改写成模糊范围。"
+        "算法机制、模块名称、实验结论必须有片段直接支撑；没有支撑时写“当前检索片段未明确说明”。"
+        "若属于合理推断，必须写“基于现有片段可推断，但仍需原文确认”。"
+        "不要把通用知识伪装成特定论文证据。"
+        "建议按三层表达：证据明确支持、基于片段可推断、当前证据不足。"
         "请严格遵守："
         "只能使用 allowed_source_types；不得使用 blocked_source_types；"
         "如果 must_disclose_limitations=true，必须说明能力边界；"
@@ -1506,7 +1673,11 @@ async def generate_analysis_node(state: LangGraphAnalysisState) -> LangGraphAnal
 
 async def evidence_check_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState:
     next_state = dict(state)
-    await _emit_progress(next_state, "正在核对证据是否支撑结论...")
+    await _emit_progress(
+        next_state,
+        "正在核对回答是否超出已有证据...",
+        phase="generation",
+    )
     sources = list(next_state.get("sources") or [])
     retrieval_results = list(next_state.get("retrieval_results") or [])
     draft_answer = str(next_state.get("draft_answer") or "")
@@ -1567,7 +1738,11 @@ async def finalize_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState
         1 for hit in retrieval_results if str((hit or {}).get("document_id") or "").strip() in target_document_ids
     )
     target_document_enough = target_document_hit_count > 0
-    await _emit_progress(next_state, "正在整理最终回答...")
+    await _emit_progress(
+        next_state,
+        "正在基于检索到的依据组织回答...",
+        phase="generation",
+    )
     deps = next_state.get("deps")
     warnings = list(next_state.get("warnings") or [])
     answer = str(next_state.get("draft_answer") or "").strip()
@@ -1699,8 +1874,14 @@ async def run_langgraph_analysis(
     }
 
     if progress_callback is not None:
-        await progress_callback("正在规划回答...")
-        await progress_callback("正在规划回答...")
+        await progress_callback(
+            {
+                "content": "正在理解问题，并判断需要哪些论文证据...",
+                "phase": "planning",
+                "user_visible": True,
+                "level": "info",
+            }
+        )
     final_state = await graph.ainvoke(initial_state)
     message = str(final_state.get("final_answer") or final_state.get("draft_answer") or "").strip()
     tools_used = list(final_state.get("tools_used") or [])

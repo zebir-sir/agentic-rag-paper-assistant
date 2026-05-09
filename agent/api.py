@@ -59,6 +59,7 @@ from .db_utils import (
     test_connection,
     refresh_session_metadata,
     list_recent_sessions,
+    delete_session,
     get_session_memory_metadata,
     update_session_memory_metadata,
 )
@@ -104,6 +105,13 @@ from .ingestion_jobs import (
     get_upload_ingestion_job,
     cancel_upload_ingestion_job,
 )
+from .stream_registry import (
+    register_stream_run,
+    unregister_stream_run,
+    cancel_stream_run,
+    get_stream_run,
+)
+from .warning_text import clean_legacy_warning_text
 
 load_dotenv()
 
@@ -119,13 +127,6 @@ LLM_STREAM_TOTAL_TIMEOUT_SECONDS = float(os.getenv("LLM_STREAM_TOTAL_TIMEOUT_SEC
 LANGGRAPH_ANALYSIS_TIMEOUT_SECONDS = float(os.getenv("LANGGRAPH_ANALYSIS_TIMEOUT_SECONDS", "90"))
 NON_STREAM_FALLBACK_TIMEOUT_SECONDS = float(os.getenv("NON_STREAM_FALLBACK_TIMEOUT_SECONDS", "35"))
 
-
-def clean_legacy_warning_text(text: str) -> str:
-    value = str(text or "")
-    return value.replace(
-        "当前没有检索到直接相关片段，以下内容更适合作为一般性分析参考。",
-        "本轮没有可核对的检索片段；未被检索证据支持的结论请谨慎参考。",
-    )
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL.upper()),
@@ -966,10 +967,39 @@ async def chat(request: ChatRequest):
 async def chat_stream(request: ChatRequest):
     try:
         session_id = await get_or_create_session(request)
+        run_id = uuid.uuid4().hex
+        logger.info("stream started: session_id=%s run_id=%s", session_id, run_id)
 
         async def generate_stream():
+            full_response = ""
+            stream_backend = get_stream_backend()
+            response_backend = get_agent_backend()
+            workflow_metadata: Dict[str, Any] = {}
+            tools_used: List[ToolCall] = []
+            sources: List[EvidenceSource] = []
+            retry_attempted = False
+            retry_failed = False
+            retry_suppressed = False
+            retry_reason: Optional[str] = None
+            llm_first_token_timeout = False
+            llm_stream_total_timeout = False
+            llm_generation_elapsed_seconds = 0.0
+            requested_search_type = _resolve_search_type(request.search_type)
+            effective_search_type = requested_search_type
+            compression_used = False
+            deps: Optional[AgentDependencies] = None
+            use_react = bool(request.use_react)
             try:
-                yield sse_event("session", session_id=session_id)
+                current_task = asyncio.current_task()
+                if current_task is not None:
+                    await register_stream_run(
+                        run_id=run_id,
+                        session_id=session_id,
+                        task=current_task,
+                        metadata={"user_id": request.user_id or "user"},
+                    )
+
+                yield sse_event("session", session_id=session_id, run_id=run_id)
                 request.session_id = session_id
                 try:
                     runtime = await asyncio.wait_for(
@@ -1029,6 +1059,7 @@ async def chat_stream(request: ChatRequest):
                     role="user",
                     content=request.message,
                     metadata={
+                        "run_id": run_id,
                         "user_id": request.user_id,
                         "compression_used": compression_used,
                         "requested_search_type": requested_search_type,
@@ -1037,20 +1068,6 @@ async def chat_stream(request: ChatRequest):
                         "use_react": use_react,
                     },
                 )
-
-                full_response = ""
-                stream_backend = get_stream_backend()
-                response_backend = get_agent_backend()
-                workflow_metadata: Dict[str, Any] = {}
-                tools_used: List[ToolCall] = []
-                sources: List[EvidenceSource] = []
-                retry_attempted = False
-                retry_failed = False
-                retry_suppressed = False
-                retry_reason: Optional[str] = None
-                llm_first_token_timeout = False
-                llm_stream_total_timeout = False
-                llm_generation_elapsed_seconds = 0.0
 
                 if explicit_web_request:
                     yield sse_event("status", content="Searching OpenAlex...")
@@ -1094,6 +1111,7 @@ async def chat_stream(request: ChatRequest):
                         role="assistant",
                         content=full_response,
                         metadata={
+                            "run_id": run_id,
                             "streamed": True,
                             "tool_calls": len(tools_used),
                             "compression_used": compression_used,
@@ -1383,6 +1401,7 @@ async def chat_stream(request: ChatRequest):
                         role="assistant",
                         content=full_response,
                         metadata={
+                            "run_id": run_id,
                             "streamed": True,
                             "tool_calls": len(tools_used),
                             "compression_used": compression_used,
@@ -1405,7 +1424,61 @@ async def chat_stream(request: ChatRequest):
                     )
                 await refresh_session_metadata(session_id)
                 yield sse_event("end")
+                logger.info("stream finished normally: session_id=%s run_id=%s", session_id, run_id)
 
+            except asyncio.CancelledError:
+                cancelled_by_user = False
+                run = await get_stream_run(run_id)
+                if run is not None:
+                    cancelled_by_user = bool(run.cancelled_by_user)
+                logger.info(
+                    "stream cancelled: session_id=%s run_id=%s cancelled_by_user=%s",
+                    session_id,
+                    run_id,
+                    cancelled_by_user,
+                )
+                try:
+                    if full_response.strip() and deps is not None:
+                        sources_data = [source.model_dump() for source in _dedupe_sources(sources)]
+                        await asyncio.shield(
+                            add_message(
+                                session_id=session_id,
+                                role="assistant",
+                                content=full_response,
+                                metadata={
+                                    "run_id": run_id,
+                                    "streamed": True,
+                                    "cancelled": True,
+                                    "cancelled_by_user": cancelled_by_user,
+                                    "partial_response": True,
+                                    "tool_calls": len(tools_used),
+                                    "compression_used": compression_used,
+                                    "requested_search_type": requested_search_type,
+                                    "effective_search_type": effective_search_type,
+                                    "sources": sources_data,
+                                    "use_web_search": deps.use_web_search,
+                                    "use_react": use_react,
+                                    "agent_backend": response_backend,
+                                    "stream_backend": stream_backend,
+                                    "retry_attempted": retry_attempted,
+                                    "retry_failed": retry_failed,
+                                    "retry_suppressed": retry_suppressed,
+                                    "retry_reason": retry_reason,
+                                    "llm_first_token_timeout": llm_first_token_timeout,
+                                    "llm_stream_total_timeout": llm_stream_total_timeout,
+                                    "llm_generation_elapsed_seconds": llm_generation_elapsed_seconds,
+                                    **workflow_metadata,
+                                },
+                            )
+                        )
+                        await asyncio.shield(refresh_session_metadata(session_id))
+                    if cancelled_by_user:
+                        yield sse_event("cancelled", run_id=run_id, message="已停止生成")
+                        yield sse_event("end")
+                        return
+                except Exception:
+                    logger.exception("Failed to persist cancelled stream partial response")
+                raise
             except Exception as e:
                 logger.exception("Stream error: %s", e)
                 error_type = type(e).__name__
@@ -1415,12 +1488,31 @@ async def chat_stream(request: ChatRequest):
                     content=f"Deep analysis stream failed: {error_type}: {error_message}",
                 )
                 yield sse_event("end")
+            finally:
+                logger.info("stream finally reached: session_id=%s run_id=%s", session_id, run_id)
+                await unregister_stream_run(run_id)
 
         return stream_response(generate_stream())
 
     except Exception as e:
         logger.exception("Streaming chat failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/chat/stream/{run_id}/cancel")
+async def cancel_chat_stream(run_id: str):
+    try:
+        result = await cancel_stream_run(run_id)
+        return {
+            "run_id": run_id,
+            "status": result.get("status", "not_found"),
+        }
+    except Exception as e:
+        logger.error("Stream cancel failed for run_id=%s error=%s", run_id, e)
+        return {
+            "run_id": run_id,
+            "status": "not_found",
+        }
 
 
 @app.post("/search/vector")
@@ -1519,6 +1611,20 @@ async def get_session_info(session_id: str):
         raise
     except Exception as e:
         logger.error(f"Session retrieval failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session_endpoint(session_id: str):
+    try:
+        deleted = await delete_session(session_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return {"status": "deleted", "session_id": session_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Session delete failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

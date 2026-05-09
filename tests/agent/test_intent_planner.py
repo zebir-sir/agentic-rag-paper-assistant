@@ -6,6 +6,8 @@ from agent.intent_planner import (
     RetrievalStep,
     build_fallback_intent_plan,
     build_intent_planner_prompt,
+    build_retry_intent_planner_prompt,
+    infer_artifact_evidence_need,
     normalize_intent_plan,
     plan_user_intent,
     plan_user_intent_debug,
@@ -51,6 +53,27 @@ def test_normalize_plan_truncates_steps_and_filters_types_and_bounds_limit():
     assert plan.retrieval_steps[0].limit == 50
     assert plan.retrieval_steps[1].limit == 1
     assert plan.retrieval_steps[0].artifact_types == ["table", "figure"]
+
+
+def test_normalize_local_artifact_plan_keeps_only_valid_artifact_types():
+    raw = {
+        "intent": "local_artifact_qa",
+        "needs_retrieval": True,
+        "retrieval_steps": [
+            {
+                "tool": "artifact_search",
+                "query": "performance comparison and pipeline visualization",
+                "limit": 8,
+                "artifact_types": ["figure", "invalid", "table"],
+            }
+        ],
+        "max_tools": 1,
+    }
+    plan = normalize_intent_plan(raw)
+    assert plan.intent == "local_artifact_qa"
+    assert len(plan.retrieval_steps) == 1
+    assert plan.retrieval_steps[0].tool == "artifact_search"
+    assert plan.retrieval_steps[0].artifact_types == ["figure", "table"]
 
 
 def test_normalize_plan_needs_retrieval_false_clears_steps():
@@ -239,8 +262,41 @@ def test_planner_prompt_is_generic_and_budgeted():
     assert "question depends on" in prompt.lower()
     assert "not an exhaustive rule list" in prompt.lower()
     assert "do not retrieve merely because retrieval tools are available" in prompt.lower()
+    assert "directly relevant to the user question" in prompt.lower()
+    assert "do not enumerate all artifacts by default" in prompt.lower()
+    assert "prefer hybrid_search or section_search" in prompt.lower()
     for banned in ["HA-RRT", "HMA-RRT", "Table 4", "Fig. 6", "吃什么", "25岁", "老不老"]:
         assert banned not in prompt
+
+
+def test_retry_planner_prompt_is_generic_and_relevant_only():
+    previous = IntentPlan(
+        intent="local_paper_qa",
+        needs_retrieval=True,
+        retrieval_steps=[RetrievalStep(tool="hybrid_search", query="method summary")],
+        max_tools=1,
+    )
+    prompt = build_retry_intent_planner_prompt(
+        question="请解释方法流程和实验对比",
+        previous_plan=previous,
+        missing_aspects=["缺少非正文证据"],
+        retrieval_summary="Only prose chunks were found.",
+        suggested_query="method process and metric comparison",
+    )
+    assert "directly relevant to the question and missing aspects" in prompt.lower()
+    assert "instead of defaulting to all artifact types" in prompt.lower()
+    for banned in ["HA-RRT", "HMA-RRT", "Table 2", "Fig. 3", "Algorithm 1"]:
+        assert banned not in prompt
+
+
+def test_infer_artifact_evidence_need_is_narrow_and_not_default_all():
+    inferred = infer_artifact_evidence_need("请根据上传论文的流程图解释方法 pipeline")
+    assert inferred["needs_artifact"] is True
+    assert inferred["artifact_types"] == ["figure"]
+
+    inferred = infer_artifact_evidence_need("请根据上传论文中的指标对比和消融结果解释性能差异")
+    assert inferred["needs_artifact"] is True
+    assert inferred["artifact_types"] == ["table"]
 
 
 @pytest.mark.asyncio
@@ -260,7 +316,27 @@ async def test_revise_intent_plan_for_retry_fallback_artifact():
     )
     assert plan.needs_retrieval is True
     assert len(plan.retrieval_steps) >= 1
-    assert plan.retrieval_steps[0].tool in {"artifact_search", "hybrid_search"}
+    assert plan.retrieval_steps[0].tool == "artifact_search"
+    assert plan.max_tools <= 2
+    assert plan.retrieval_steps[0].artifact_types == ["table"]
+
+
+def test_build_fallback_intent_plan_can_target_relevant_artifact_only():
+    caps = PlannerCapabilities(
+        hybrid_search_enabled=True,
+        artifact_search_enabled=True,
+        max_tools=2,
+    )
+    plan = build_fallback_intent_plan(
+        "请根据上传论文里的流程图解释方法 pipeline",
+        capabilities=caps,
+    )
+    assert plan.intent == "local_artifact_qa"
+    assert plan.needs_retrieval is True
+    assert len(plan.retrieval_steps) == 1
+    assert plan.retrieval_steps[0].tool == "artifact_search"
+    assert plan.retrieval_steps[0].artifact_types == ["figure"]
+    assert plan.max_tools <= 2
 
 
 def test_capabilities_filter_unavailable_external_tools_without_local_cues():

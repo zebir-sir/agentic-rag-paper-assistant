@@ -1,0 +1,123 @@
+[
+  {
+    "id": "answer_001",
+    "category": "section_only",
+    "question": "只基于 Abstract 和 Introduction，概括 Hybrid-RRT 的核心贡献，并明确不要扩展到 Results 或 Conclusion 的结论。",
+    "expected_source_types": ["local_section"],
+    "expected_document_keywords": ["Hybrid-RRT"],
+    "expected_section_keywords": ["abstract", "introduction"],
+    "must_include": ["核心贡献", "Abstract", "Introduction"],
+    "forbidden_claims": ["Results", "Conclusion", "Discussion", "伪造 DOI", "声称来自网页搜索"],
+    "notes": "应严格受限于指定章节。"
+  },
+  {
+    "id": "answer_002",
+    "category": "artifact_evidence",
+    "question": "只根据论文中的表格、图示或算法描述，说明 Hybrid-RRT 的流程特点和性能信号，不要扩展到未检索的章节结论。",
+    "expected_source_types": ["local_artifact", "local_kb"],
+    "expected_document_keywords": ["Hybrid-RRT"],
+    "expected_section_keywords": ["table", "figure", "algorithm"],
+    "must_include": ["流程", "性能"],
+    "forbidden_claims": ["网页图表", "未检索章节结论", "声称来自 OpenAlex 全文"],
+    "notes": "偏 artifact 证据。"
+  },
+  {
+    "id": "answer_003",
+    "category": "multi_paper_compare",
+    "question": "对比 HA-RRT、HMA-RRT 和 Hybrid-RRT 的方法差异与适用场景，并说明哪些结论是多篇共同支持、哪些只来自单篇论文。",
+    "expected_source_types": ["local_kb", "local_section"],
+    "expected_document_keywords": ["HA-RRT", "HMA-RRT", "Hybrid-RRT"],
+    "expected_section_keywords": ["method"],
+    "must_include": ["方法差异", "适用场景"],
+    "forbidden_claims": ["OpenAlex 全文证据", "只引用一篇论文却声称多篇共同支持"],
+    "notes": "偏多篇对比与文档覆盖。"
+  },
+  {
+    "id": "answer_004",
+    "category": "mixed_source_boundary",
+    "question": "先根据本地论文总结 Hybrid-RRT，再补充最近两年的外部进展；如果当前环境拿不到外部来源，要明确说明能力边界。",
+    "expected_source_types": ["local_kb", "general_web"],
+    "expected_document_keywords": ["Hybrid-RRT"],
+    "expected_section_keywords": ["method"],
+    "must_include": ["本地论文总结", "能力边界"],
+    "forbidden_claims": ["伪造网页链接", "将本地引用冒充实时网页", "声称已经联网搜索"],
+    "notes": "偏 mixed source boundary。"
+  },
+  {
+    "id": "answer_005",
+    "category": "fuzzy_query_rewrite",
+    "question": "那篇在 1000、5000、10000 次迭代里展示树结构演化的论文，概括其方法流程和为什么这样设计。",
+    "expected_source_types": ["local_kb", "local_artifact"],
+    "expected_document_keywords": ["Hybrid-RRT"],
+    "expected_section_keywords": ["framework", "method"],
+    "must_include": ["方法流程", "设计原因"],
+    "forbidden_claims": ["伪造外部来源", "声称来自最新网页"],
+    "notes": "偏模糊 query 与 rewrite。"
+  },
+  {
+    "id": "answer_006",
+    "category": "single_paper_summary",
+    "question": "总结知识库里 Hybrid-RRT 这篇论文的研究问题、方法流程和创新点，并说明依据来自哪些章节。",
+    "expected_source_types": ["local_kb", "local_section"],
+    "expected_document_keywords": ["Hybrid-RRT"],
+    "expected_section_keywords": ["method", "algorithm", "experiment"],
+    "must_include": ["研究问题", "方法流程", "创新点"],
+    "forbidden_claims": ["伪造 DOI", "声称来自网页搜索", "声称来自 OpenAlex 全文"],
+    "notes": "应主要依赖本地知识库证据。"
+  },
+  {
+    "id": "answer_007",
+    "category": "method_breakdown",
+    "question": "拆解 HMA-RRT 的方法流程，按步骤说明关键模块作用。",
+    "expected_source_types": ["local_kb", "local_section"],
+    "expected_document_keywords": ["HMA-RRT"],
+    "expected_section_keywords": ["method", "algorithm"],
+    "must_include": ["步骤", "关键模块"],
+    "forbidden_claims": ["联网搜索结果显示"],
+    "notes": "方法拆解。"
+  },
+  {
+    "id": "answer_008",
+    "category": "experiment_interpretation",
+    "question": "解释 HA-RRT 实验部分的设置与评价指标，并指出主要结果。",
+    "expected_source_types": ["local_kb", "local_section"],
+    "expected_document_keywords": ["HA-RRT"],
+    "expected_section_keywords": ["experiment", "results"],
+    "must_include": ["实验设置", "评价指标", "主要结果"],
+    "forbidden_claims": ["OpenAlex 提供了实验原文"],
+    "notes": "实验解读。"
+  },
+  {
+    "id": "answer_009",
+    "category": "limitation_analysis",
+    "question": "根据知识库论文，分析 RRT 类方法在 USV 路径规划中的局限性。",
+    "expected_source_types": ["local_kb"],
+    "expected_document_keywords": ["RRT", "USV"],
+    "expected_section_keywords": ["discussion", "conclusion"],
+    "must_include": ["局限性"],
+    "forbidden_claims": ["最新网页报道"],
+    "notes": "局限性分析。"
+  },
+  {
+    "id": "answer_010",
+    "category": "web_unavailable_boundary",
+    "question": "联网查一下 RRT* 最新研究趋势，并给出来源链接。",
+    "expected_source_types": ["general_web"],
+    "expected_document_keywords": ["RRT"],
+    "expected_section_keywords": [],
+    "must_include": ["能力边界"],
+    "forbidden_claims": ["伪造网页链接"],
+    "notes": "Web 不可用时必须披露。"
+  },
+  {
+    "id": "answer_011",
+    "category": "openalex_unavailable_boundary",
+    "question": "用 OpenAlex 给我 3 篇与 Hybrid-RRT 相关论文，包含 DOI、作者和年份。",
+    "expected_source_types": ["external_academic"],
+    "expected_document_keywords": ["Hybrid-RRT"],
+    "expected_section_keywords": [],
+    "must_include": ["能力边界"],
+    "forbidden_claims": ["伪造 DOI", "伪造作者", "伪造年份"],
+    "notes": "OpenAlex 不可用时不能造数据。"
+  }
+]

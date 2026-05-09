@@ -39,6 +39,273 @@ def inject_styles() -> None:
     st.markdown(
         """
 <style>
+[data-testid="stAppViewContainer"] {
+    background: #f3f6fb;
+    color: #334155;
+}
+[data-testid="stHeader"] {
+    background: rgba(243, 246, 251, 0.9);
+}
+.main .block-container {
+    max-width: 1040px;
+    margin-left: auto;
+    margin-right: auto;
+    padding-top: 1.35rem;
+    padding-bottom: 1.1rem;
+}
+[data-testid="stChatInput"] {
+    max-width: 1040px;
+    margin-left: auto;
+    margin-right: auto;
+    background: #ffffff;
+    border: 1px solid #d8e0ec;
+    border-radius: 14px;
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
+    padding: 8px 10px;
+}
+[data-testid="stChatInput"]::before {
+    display: none;
+}
+[data-testid="stChatInput"] > div,
+[data-testid="stChatInput"] form,
+[data-testid="stChatInput"] [data-baseweb="textarea"],
+[data-testid="stChatInput"] [data-baseweb="textarea"] > div {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+[data-testid="stChatInput"] textarea {
+    background: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    outline: none !important;
+    color: #334155 !important;
+    padding: 0.3rem 0 !important;
+}
+[data-testid="stChatInput"] textarea:focus,
+[data-testid="stChatInput"] textarea:focus-visible {
+    border: none !important;
+    box-shadow: none !important;
+    outline: none !important;
+}
+[data-testid="stChatInput"] button {
+    box-shadow: none !important;
+    border-radius: 10px !important;
+}
+[data-testid="stChatInput"] button:not(:disabled) {
+    background: #ef4444 !important;
+    color: #ffffff !important;
+    border: none !important;
+}
+[data-testid="stChatInput"] button:not(:disabled):hover {
+    background: #dc2626 !important;
+    color: #ffffff !important;
+    border: none !important;
+}
+[data-testid="stChatInput"] button:disabled {
+    background: #e2e8f0 !important;
+    color: #94a3b8 !important;
+    border: none !important;
+    opacity: 1 !important;
+}
+[data-testid="stChatInput"] button svg {
+    fill: currentColor !important;
+}
+.stMarkdown, .stText, p, li, label {
+    color: #334155;
+}
+h1, h2, h3, h4, h5, h6 {
+    color: #0f172a;
+}
+[data-testid="stSidebar"] {
+    background: #eef2f7;
+    border-right: 1px solid #dbe3ee;
+}
+[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+    background: #eef2f7;
+}
+[data-testid="stSidebar"] .stMarkdown,
+[data-testid="stSidebar"] .stText,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 {
+    color: #334155;
+}
+.stChatMessage {
+    max-width: 100%;
+    padding: 0.2rem 0;
+}
+.stAlert {
+    max-width: 100%;
+    border: 1px solid #e5eaf2;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.88);
+}
+.stChatMessage [data-testid="stMarkdownContainer"] > p:first-child {
+    margin-top: 0.1rem;
+}
+.stChatMessage {
+    border-radius: 12px;
+}
+[data-testid="stChatMessageContent"] {
+    border: 1px solid #e5eaf2;
+    border-radius: 12px;
+    padding: 0.9rem 1rem 0.95rem 1rem;
+    background: #f8fbff;
+    box-shadow: 0 4px 14px rgba(15, 23, 42, 0.04);
+}
+[data-testid="stChatMessage"]:has([aria-label="Chat message from user"]) [data-testid="stChatMessageContent"] {
+    background: #f1f5f9;
+    border-color: #dbe4f0;
+}
+.workspace-hero {
+    border: 1px solid #e5eaf2;
+    border-radius: 16px;
+    padding: 1.5rem 1.75rem 1.3rem 1.75rem;
+    background: #ffffff;
+    box-shadow: 0 12px 28px rgba(15, 23, 42, 0.05);
+    margin-bottom: 1rem;
+}
+.workspace-hero h1 {
+    font-size: 2rem;
+    line-height: 1.2;
+    margin: 0 0 0.4rem 0;
+    color: #0f172a;
+}
+.workspace-hero p {
+    color: #64748b;
+    margin: 0;
+}
+.workspace-hero-examples {
+    margin-top: 0.85rem;
+    color: #64748b;
+    font-size: 0.95rem;
+    line-height: 1.65;
+}
+.workspace-toolbar-label {
+    font-size: 0.78rem;
+    letter-spacing: 0.02em;
+    color: #64748b;
+    margin-bottom: 0.2rem;
+}
+.workspace-toolbar-anchor + div {
+    border-top: 1px solid #dbe3ee;
+    background: transparent;
+    border-radius: 0;
+    box-shadow: none;
+    padding: 0.5rem 0 0.2rem 0;
+    margin-top: 0.15rem;
+}
+.workspace-toolbar-anchor + div [data-testid="stVerticalBlock"] {
+    gap: 0.35rem;
+}
+.workspace-chat-stage {
+    border: 1px solid #e5eaf2;
+    border-radius: 18px;
+    padding: 0.7rem 0.9rem 0.9rem 0.9rem;
+    background: rgba(255, 255, 255, 0.72);
+    box-shadow: 0 10px 28px rgba(15, 23, 42, 0.04);
+    margin-bottom: 0.9rem;
+}
+[data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"] {
+    border-color: #d8e2f0;
+    background: #ffffff;
+}
+[data-testid="stSidebar"] .history-list-anchor + div [data-testid="stVerticalBlock"] {
+    gap: 0.12rem;
+}
+[data-testid="stSidebar"] .history-item-anchor + div {
+    margin-top: 0 !important;
+}
+[data-testid="stSidebar"] .history-title-anchor + div [data-testid="stButton"] button,
+[data-testid="stSidebar"] .history-delete-anchor + div [data-testid="stButton"] button {
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    outline: none !important;
+    min-height: 36px !important;
+    border-radius: 10px !important;
+}
+[data-testid="stSidebar"] .history-title-anchor + div [data-testid="stButton"] button {
+    padding: 6px 8px !important;
+    justify-content: flex-start !important;
+    text-align: left !important;
+    width: 100%;
+    color: #1f2937 !important;
+    font-weight: 500;
+    font-size: 13px !important;
+}
+[data-testid="stSidebar"] .history-title-anchor.active + div [data-testid="stButton"] button {
+    background: #eaf1ff !important;
+    box-shadow: inset 2px 0 0 #4f7cff !important;
+}
+[data-testid="stSidebar"] .history-title-anchor + div [data-testid="stButton"] button:hover {
+    background: #f5f8fc !important;
+    color: #111827 !important;
+}
+[data-testid="stSidebar"] .history-title-anchor + div [data-testid="stButton"] button p {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    width: 100%;
+    margin: 0;
+}
+[data-testid="stSidebar"] .history-delete-anchor + div [data-testid="stButton"] {
+    display: flex;
+    justify-content: flex-end;
+}
+[data-testid="stSidebar"] .history-delete-anchor + div [data-testid="stButton"] button {
+    width: 28px !important;
+    min-width: 28px !important;
+    height: 28px !important;
+    min-height: 28px !important;
+    padding: 0 !important;
+    margin-top: 4px;
+    color: #94a3b8 !important;
+    font-size: 1rem;
+    opacity: 0.28;
+}
+[data-testid="stSidebar"] .history-item-anchor + div:hover .history-delete-anchor + div [data-testid="stButton"] button,
+[data-testid="stSidebar"] .history-delete-anchor + div [data-testid="stButton"] button:focus,
+[data-testid="stSidebar"] .history-delete-anchor + div [data-testid="stButton"] button:hover {
+    opacity: 1;
+}
+[data-testid="stSidebar"] .history-delete-anchor + div [data-testid="stButton"] button:hover {
+    background: #e5e7eb !important;
+    color: #ef4444 !important;
+}
+[data-testid="stSidebar"] .history-confirm-anchor + div {
+    margin: -0.1rem 0 0.35rem 0;
+}
+[data-testid="stSidebar"] .history-confirm-anchor + div [data-testid="stMarkdownContainer"] p {
+    font-size: 12px;
+    color: #64748b;
+}
+[data-testid="stSidebar"] .history-confirm-anchor + div [data-testid="stButton"] button {
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    min-height: 28px !important;
+    height: 28px !important;
+    padding: 0 6px !important;
+    border-radius: 8px !important;
+    font-size: 12px !important;
+}
+[data-testid="stSidebar"] .history-confirm-anchor + div [data-testid="stButton"] button:hover {
+    background: #eef2f7 !important;
+}
+[data-testid="stSidebar"] .history-confirm-anchor + div [data-testid="stButton"]:first-of-type button {
+    color: #334155 !important;
+}
+[data-testid="stSidebar"] .history-confirm-anchor + div [data-testid="stButton"]:nth-of-type(2) button {
+    color: #64748b !important;
+}
+.workspace-chat-stage .stChatMessage {
+    margin-bottom: 0.35rem;
+}
 .stChatMessage h1 {font-size: 1.45rem !important; line-height: 1.35 !important;}
 .stChatMessage h2 {font-size: 1.25rem !important; line-height: 1.35 !important;}
 .stChatMessage h3 {font-size: 1.12rem !important; line-height: 1.35 !important;}

@@ -1,4 +1,4 @@
-﻿import os
+import os
 import time
 from typing import Any, Dict
 from urllib.parse import urlparse, urlunparse
@@ -10,37 +10,39 @@ from dotenv import load_dotenv
 try:
     from ui.api_client import (
         add_openalex_source_to_kb,
+        cancel_chat_stream,
+        delete_session,
         fetch_documents,
         fetch_openalex_status,
         fetch_session_messages,
         fetch_sessions,
         fetch_web_search_status,
-        format_session_time,
         clean_assistant_display_text,
         stream_chat,
         cancel_ingestion_job,
         fetch_ingestion_job,
         start_pdf_ingestion,
-        upload_pdf_to_kb,
     )
     from ui.components import inject_styles, render_analysis_panel, render_sources
+    from ui.layout_state import should_show_welcome_guide_from_state
 except ImportError:  # pragma: no cover - streamlit script mode
     from api_client import (
         add_openalex_source_to_kb,
+        cancel_chat_stream,
+        delete_session,
         fetch_documents,
         fetch_openalex_status,
         fetch_session_messages,
         fetch_sessions,
         fetch_web_search_status,
-        format_session_time,
         clean_assistant_display_text,
         stream_chat,
         cancel_ingestion_job,
         fetch_ingestion_job,
         start_pdf_ingestion,
-        upload_pdf_to_kb,
     )
     from components import inject_styles, render_analysis_panel, render_sources
+    from layout_state import should_show_welcome_guide_from_state
 
 
 load_dotenv()
@@ -67,9 +69,14 @@ def ensure_app_state() -> None:
         "search_type": "hybrid",
         "is_streaming": False,
         "stop_requested": False,
+        "stop_button_visible": False,
+        "cancel_requested": False,
+        "cancel_status": "",
+        "current_run_id": None,
         "ingestion_job_id": None,
         "ingestion_job_filename": None,
         "ingestion_job_done": False,
+        "confirm_delete_session_id": None,
     }
     for key, default in defaults.items():
         if key not in st.session_state:
@@ -212,7 +219,11 @@ def send_user_message(
             allow_web_search=allow_web_search,
             allow_openalex_search=allow_openalex_search,
         )
+    st.session_state.is_streaming = False
+    st.session_state.stop_requested = False
+    st.session_state.cancel_requested = False
     st.session_state.session_list = fetch_sessions(base_url)
+    st.rerun()
 
 
 def _effective_use_web_search(openalex_enabled: bool, general_web_enabled: bool) -> bool:
@@ -221,15 +232,27 @@ def _effective_use_web_search(openalex_enabled: bool, general_web_enabled: bool)
     return bool((allow_openalex and openalex_enabled) or (allow_web and general_web_enabled))
 
 
+def should_show_welcome_guide() -> bool:
+    return should_show_welcome_guide_from_state(
+        messages=st.session_state.get("messages") or [],
+        pending_prompt=st.session_state.get("pending_prompt"),
+        is_streaming=bool(st.session_state.get("is_streaming")),
+        streaming_response="",
+    )
+
+
 def render_welcome_guide() -> None:
-    st.markdown("### 开始阅读你的论文")
-    st.caption("你可以直接提问，也可以使用下方输入框上方的「分析面板」选择论文总结、创新点分析或多篇对比。")
     st.markdown(
-        "- `总结这篇论文的研究问题、核心方法和创新点`\n"
-        "- `分析这篇论文的实验设置是否充分`\n"
-        "- `对比两篇论文的方法差异和适用场景`\n"
-        "- `帮我查找某个方向的 related work 并给出来源`\n"
-        "- `例如：对比 RRT* 和 Informed RRT* 的区别`"
+        """
+<div class="workspace-hero">
+  <h1>科研论文阅读助手</h1>
+  <p>面向长论文、多源证据与 Agentic RAG 的科研分析工作台</p>
+  <div class="workspace-hero-examples">
+    你可以直接输入例如：总结这篇论文、分析实验设计、对比几篇论文、查找 related work。
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
     )
 
 
@@ -386,18 +409,21 @@ def render_input_toolbar(
     general_web_enabled: bool,
     general_web_provider: str,
 ) -> None:
-    st.caption("系统会在你开启的能力范围内自动规划本地检索、章节检索、图表/算法检索以及可用的外部检索。")
-    left, right = st.columns([2.1, 7.9])
-    with left:
-        c1, c2 = st.columns(2)
-        with c1:
-            _render_analysis_panel_compact(resolved_base_url, backend_health_ok)
-        with c2:
-            _render_tools_compact(openalex_enabled, general_web_enabled, general_web_provider, backend_health_ok)
-    with right:
-        if bool(st.session_state.get("is_streaming")):
-            if st.button("■ 停止", type="secondary", use_container_width=True):
-                st.session_state.stop_requested = True
+    st.markdown(
+        '<div class="workspace-toolbar-label">全局操作区</div><div class="workspace-toolbar-anchor"></div>',
+        unsafe_allow_html=True,
+    )
+    with st.container():
+        left, right = st.columns([2.8, 1.2], vertical_alignment="center")
+        with left:
+            c1, c2 = st.columns(2)
+            with c1:
+                _render_analysis_panel_compact(resolved_base_url, backend_health_ok)
+            with c2:
+                _render_tools_compact(openalex_enabled, general_web_enabled, general_web_provider, backend_health_ok)
+        with right:
+            if bool(st.session_state.get("cancel_status")):
+                st.caption(st.session_state.get("cancel_status"))
 
 
 with st.sidebar:
@@ -438,18 +464,59 @@ with st.sidebar:
     st.session_state.session_list = fetch_sessions(resolved_base_url) if backend_health_ok else []
     if not st.session_state.session_list:
         st.caption("暂无历史会话" if backend_health_ok else "后端不可达，无法加载历史会话")
+    st.markdown('<div class="history-list-anchor"></div>', unsafe_allow_html=True)
     for session in st.session_state.session_list:
         sid = session.get("session_id")
         title = session.get("title") or "新对话"
-        time_str = format_session_time(session.get("updated_at"))
         selected = sid == st.session_state.active_session_id
-        label = f"{'● ' if selected else ''}{title}  {time_str}"
-        if st.button(label, key=f"session_{sid}", use_container_width=True):
-            st.session_state.active_session_id = sid
-            st.session_state.messages = fetch_session_messages(resolved_base_url, sid)
-            st.session_state.restored_session_id = sid
-            st.session_state.pending_prompt = None
-            st.rerun()
+        marker_class = "history-item-anchor active" if selected else "history-item-anchor"
+        st.markdown(f'<div class="{marker_class}"></div>', unsafe_allow_html=True)
+        row_left, row_right = st.columns([0.86, 0.14], vertical_alignment="center")
+        with row_left:
+            title_marker_class = "history-title-anchor active" if selected else "history-title-anchor"
+            st.markdown(f'<div class="{title_marker_class}"></div>', unsafe_allow_html=True)
+            if st.button(
+                str(title),
+                key=f"session_{sid}",
+                type="tertiary",
+                use_container_width=True,
+            ):
+                st.session_state.active_session_id = sid
+                st.session_state.messages = fetch_session_messages(resolved_base_url, sid)
+                st.session_state.restored_session_id = sid
+                st.session_state.pending_prompt = None
+                st.session_state.confirm_delete_session_id = None
+                st.rerun()
+        with row_right:
+            st.markdown('<div class="history-delete-anchor"></div>', unsafe_allow_html=True)
+            if st.button("×", key=f"delete_session_{sid}", type="tertiary", use_container_width=True):
+                current = st.session_state.get("confirm_delete_session_id")
+                st.session_state.confirm_delete_session_id = None if current == sid else sid
+                st.rerun()
+
+        if st.session_state.get("confirm_delete_session_id") == sid:
+            st.markdown('<div class="history-confirm-anchor"></div>', unsafe_allow_html=True)
+            confirm_text_col, confirm_yes_col, confirm_no_col = st.columns([0.56, 0.22, 0.22], vertical_alignment="center")
+            with confirm_text_col:
+                st.caption("确认删除？")
+            with confirm_yes_col:
+                if st.button("确认", key=f"confirm_delete_{sid}", type="secondary", use_container_width=True):
+                    ok, msg = delete_session(resolved_base_url, sid)
+                    if ok:
+                        if st.session_state.active_session_id == sid:
+                            st.session_state.active_session_id = None
+                            st.session_state.messages = []
+                            st.session_state.restored_session_id = None
+                            st.session_state.pending_prompt = None
+                        st.session_state.confirm_delete_session_id = None
+                        st.session_state.session_list = fetch_sessions(resolved_base_url) if backend_health_ok else []
+                    else:
+                        st.error(msg)
+                    st.rerun()
+            with confirm_no_col:
+                if st.button("取消", key=f"cancel_delete_{sid}", type="tertiary", use_container_width=True):
+                    st.session_state.confirm_delete_session_id = None
+                    st.rerun()
 
 
 openalex_enabled = fetch_openalex_status(resolved_base_url) if backend_health_ok else False
@@ -461,11 +528,10 @@ web_search_status = (
 general_web_enabled = bool(web_search_status.get("enabled"))
 general_web_provider = str(web_search_status.get("provider") or "")
 
-st.title("科研论文阅读助手")
-
 if not st.session_state.messages:
     render_welcome_guide()
 
+st.markdown('<div class="workspace-chat-anchor"></div>', unsafe_allow_html=True)
 for idx, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         if msg["role"] == "assistant":
@@ -475,8 +541,38 @@ for idx, msg in enumerate(st.session_state.messages):
         if msg["role"] == "assistant":
             metadata = msg.get("metadata") or {}
             sources = metadata.get("sources") if isinstance(metadata, dict) else []
+            if bool(metadata.get("cancelled")) or bool(metadata.get("partial_response")):
+                st.caption("已停止生成 · partial response")
             if isinstance(sources, list) and sources:
                 render_sources(sources, resolved_base_url, f"hist_{idx}", add_openalex_source_to_kb)
+
+render_ingestion_progress(resolved_base_url)
+
+render_input_toolbar(
+    resolved_base_url=resolved_base_url,
+    backend_health_ok=backend_health_ok,
+    openalex_enabled=openalex_enabled,
+    general_web_enabled=general_web_enabled,
+    general_web_provider=general_web_provider,
+)
+
+if prompt := st.chat_input(
+    "请输入您的问题",
+    disabled=(not backend_health_ok),
+):
+    if not backend_health_ok:
+        st.warning("后端不可用，请先检查服务状态。")
+        st.stop()
+    send_user_message(
+        prompt,
+        resolved_base_url,
+        "hybrid",
+        _effective_use_web_search(openalex_enabled, general_web_enabled),
+        bool(st.session_state.get("use_general_web_search", False)),
+        bool(st.session_state.get("use_openalex_search", False)),
+        bool(st.session_state.get("use_react", True)),
+    )
+    st.rerun()
 
 if st.session_state.pending_prompt:
     pending = st.session_state.pending_prompt
@@ -491,27 +587,3 @@ if st.session_state.pending_prompt:
         bool(st.session_state.get("use_react", True)),
     )
     st.rerun()
-
-render_ingestion_progress(resolved_base_url)
-
-render_input_toolbar(
-    resolved_base_url=resolved_base_url,
-    backend_health_ok=backend_health_ok,
-    openalex_enabled=openalex_enabled,
-    general_web_enabled=general_web_enabled,
-    general_web_provider=general_web_provider,
-)
-
-if prompt := st.chat_input("请输入您的问题", disabled=not backend_health_ok):
-    if not backend_health_ok:
-        st.warning("后端不可用，请先检查服务状态。")
-        st.stop()
-    send_user_message(
-        prompt,
-        resolved_base_url,
-        "hybrid",
-        _effective_use_web_search(openalex_enabled, general_web_enabled),
-        bool(st.session_state.get("use_general_web_search", False)),
-        bool(st.session_state.get("use_openalex_search", False)),
-        bool(st.session_state.get("use_react", True)),
-    )
