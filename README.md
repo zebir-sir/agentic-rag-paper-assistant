@@ -20,6 +20,7 @@
 
 [项目简介](#-项目简介) ·
 [核心能力](#-核心能力) ·
+[设计权衡](#-设计权衡) ·
 [界面预览](#️-界面预览) ·
 [系统架构](#️-系统架构) ·
 [快速开始](#-快速开始) ·
@@ -45,7 +46,7 @@
 | 问题 | 项目中的处理方式 |
 |---|---|
 | 固定长度切块破坏章节边界 | 使用 section-aware chunking 保留章节路径、行号和分片信息 |
-| 表格、图示、算法容易被正文检索忽略 | 将 table / figure / algorithm 抽取为 artifact evidence |
+| 表格、图示、算法容易被正文检索忽略 | 将 table / figure / algorithm 抽取为可检索的 artifact evidence |
 | 本地论文、OpenAlex、网页来源容易混淆 | 通过 Source-aware Planner 约束来源边界 |
 | 检索不足时缺少恢复机制 | 使用 LangGraph 显式组织 retrieval evaluation / query rewrite / retry |
 | 回答依据难验证 | 前端展示论文来源、章节、行号、相似度和依据片段 |
@@ -57,13 +58,23 @@
 | 能力 | 说明 |
 |---|---|
 | **Section-aware Ingestion** | 使用 Docling 解析 PDF，并基于 Markdown heading 识别论文结构，保留 `section_title`、`section_path_text`、行号和章节内分片。 |
-| **Artifact-aware Retrieval** | 对表格、图示、算法/伪代码进行独立证据建模，支持围绕图表、实验指标和算法流程的精细检索。 |
-| **Source-aware Planner** | 根据用户意图判断是否检索、检索哪些来源、可用工具有哪些，以及回答时需要遵守的来源边界。 |
+| **Artifact Evidence Extraction & Retrieval** | 将表格、图示、算法/伪代码从正文中独立抽取为 `artifact chunk`，保留 caption、上下文与章节路径；Agent 可通过 `artifact_search` 直接检索这些非正文证据，而不是依赖正文描述间接召回。 |
+| **Source-aware Intent Planner** | Planner 输出结构化 `IntentPlan`，包括 intent、是否需要检索、计划工具、来源约束和回答边界；运行时会根据能力开关过滤不可用工具，并在 Web / OpenAlex 不可用时进入 disclosure 策略，避免用本地论文证据冒充外部检索结果。 |
 | **LangGraph Retrieval Workflow** | 将复杂问答拆成意图规划、范围解析、检索、质量评估、必要时重写与重试、证据检查和最终生成。 |
 | **Evidence Tracing** | 回答可展开依据片段，展示本地论文、章节路径、行号、分片、相似度和 snippet，方便核对结论来源。 |
 | **OpenAlex Academic Search** | 支持检索知识库外的论文元数据，包括作者、年份、DOI、venue、开放获取链接，并可将可访问论文加入知识库。 |
 | **Streaming Research UI** | 基于 Streamlit 构建科研分析工作台，支持流式问答、工具开关、分析面板、历史会话和上传入库。 |
 | **Long-session Memory Compression** | 长轮次论文分析中对上下文进行滚动摘要，保留讨论对象、用户约束、章节范围和来源限制，同时过滤 Planner / Tool 调试字段。 |
+
+---
+
+## 🧠 设计权衡
+
+| 技术决策 | 设计考虑 |
+|---|---|
+| **LangGraph over one-shot RAG** | 论文问答经常需要规划、检索、评估、重试和证据检查。相比一次性 RAG chain，LangGraph 更适合管理带状态的多阶段工作流。 |
+| **Planner before Tool Calling** | 不让 Agent 盲目调用所有工具，而是先生成结构化 `IntentPlan`，再由 Source Policy 和 runtime capabilities 约束工具调用，降低工具误用和来源混淆风险。 |
+| **Artifact as Evidence Chunk** | 表格、图示、算法块独立存储，避免长表格稀释正文语义；当问题指向实验指标、流程图或伪代码时，可通过 `artifact_search` 精准召回。 |
 
 ---
 
@@ -162,6 +173,8 @@ flowchart TD
 ```
 
 Planner 默认遵循最小必要检索原则：能直答的问题不会强行检索；论文问题优先走本地知识库；外部论文发现才使用 OpenAlex；网页搜索仅在用户需求和配置都满足时启用。
+
+在检索阶段，系统会记录每轮 retrieval attempts、top score、result count 和不足原因；当证据不足时，workflow 会进入 query rewrite / retry 分支，并将 rewritten queries 与最终 sources 一起写入 metadata，方便回溯检索行为。对于复杂问题，系统可以结合检索结果摘要判断当前证据是否覆盖问题要求，并在缺少章节、artifact 或目标文档证据时触发定向重查。
 
 ---
 
