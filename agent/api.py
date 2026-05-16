@@ -63,6 +63,8 @@ from .db_utils import (
     get_session_memory_metadata,
     update_session_memory_metadata,
 )
+from .app_config import get_rabbitmq_url
+from .ingestion_tasks_db import get_ingestion_task
 from .models import (
     ChatRequest,
     ChatResponse,
@@ -76,6 +78,7 @@ from .models import (
     SessionListItem,
     SessionMessagesResponse,
     ChatMessageItem,
+    IngestionTaskResponse,
 )
 from .tools import (
     vector_search_tool,
@@ -104,6 +107,7 @@ from .ingestion_jobs import (
     start_upload_ingestion_job,
     get_upload_ingestion_job,
     cancel_upload_ingestion_job,
+    submit_async_ingestion_task,
 )
 from .stream_registry import (
     register_stream_run,
@@ -126,6 +130,7 @@ LLM_FIRST_TOKEN_TIMEOUT_SECONDS = float(os.getenv("LLM_FIRST_TOKEN_TIMEOUT_SECON
 LLM_STREAM_TOTAL_TIMEOUT_SECONDS = float(os.getenv("LLM_STREAM_TOTAL_TIMEOUT_SECONDS", "75"))
 LANGGRAPH_ANALYSIS_TIMEOUT_SECONDS = float(os.getenv("LANGGRAPH_ANALYSIS_TIMEOUT_SECONDS", "90"))
 NON_STREAM_FALLBACK_TIMEOUT_SECONDS = float(os.getenv("NON_STREAM_FALLBACK_TIMEOUT_SECONDS", "35"))
+RABBITMQ_URL = get_rabbitmq_url()
 
 
 logging.basicConfig(
@@ -1614,6 +1619,20 @@ async def get_session_info(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/ingestion/tasks/{task_id}", response_model=IngestionTaskResponse)
+async def get_ingestion_task_endpoint(task_id: str):
+    try:
+        task = await get_ingestion_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Ingestion task not found")
+        return IngestionTaskResponse(**task)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ingestion task retrieval failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.delete("/sessions/{session_id}")
 async def delete_session_endpoint(session_id: str):
     try:
@@ -1640,6 +1659,12 @@ async def add_openalex_to_knowledge_base(payload: Dict[str, Any]):
 @app.post("/documents/upload")
 async def upload_document_to_kb(payload: Dict[str, Any]):
     return await run_sync_upload_ingestion(payload)
+
+
+@app.post("/ingestion/tasks", response_model=IngestionTaskResponse)
+async def submit_ingestion_task(payload: Dict[str, Any]):
+    task = await submit_async_ingestion_task(payload)
+    return IngestionTaskResponse(**task)
 
 
 @app.post("/documents/upload/start")

@@ -4,7 +4,7 @@
 
 **面向科研论文阅读、证据追踪与多源检索的 Agentic RAG 工作台**
 
-基于 **FastAPI + Streamlit + PostgreSQL/pgvector + LangChain/LangGraph** 构建，支持 PDF 论文入库、章节级检索、图表/算法证据抽取、OpenAlex 学术检索、流式问答与可回归评测。
+基于 **FastAPI + Streamlit + PostgreSQL/pgvector + LangChain/LangGraph** 构建，支持 PDF 论文入库、章节级检索、图表/算法证据抽取、OpenAlex 学术检索、流式问答与可回归评测；同时提供可选的 RabbitMQ 异步入库与 Redis 查询缓存能力，便于在本地或私有化环境中处理较耗时的文档入库任务。
 
 <br />
 
@@ -37,7 +37,7 @@
 
 **Agentic RAG Paper Assistant** 是一个面向科研论文阅读场景的 Agentic RAG 工程项目。它不是简单的“向量检索 + LLM 总结”Demo，而是围绕长 PDF 论文的结构化入库、多源证据检索、来源边界控制和可追踪回答生成，构建了一套端到端科研分析工作流。
 
-项目适合用于本地或私有化部署，覆盖论文总结、方法拆解、实验解读、创新点分析、多篇论文对比、related work 检索和证据追踪等典型科研阅读任务。
+项目适合用于本地或私有化部署，覆盖论文总结、方法拆解、实验解读、创新点分析、多篇论文对比、related work 检索和证据追踪等典型科研阅读任务。对于较大的 PDF 或批量入库场景，系统也支持将解析、切块、embedding 与向量入库交给后台 worker 执行，避免长任务阻塞前端请求。
 
 ### 为什么不是普通 RAG？
 
@@ -49,6 +49,7 @@
 | 表格、图示、算法容易被正文检索忽略 | 将 table / figure / algorithm 抽取为可检索的 artifact evidence |
 | 本地论文、OpenAlex、网页来源容易混淆 | 通过 Source-aware Planner 约束来源边界 |
 | 检索不足时缺少恢复机制 | 使用 LangGraph 显式组织 retrieval evaluation / query rewrite / retry |
+| PDF 入库任务耗时较长 | 可选使用 RabbitMQ + worker 后台处理解析、切块、embedding 与入库 |
 | 回答依据难验证 | 前端展示论文来源、章节、行号、相似度和依据片段 |
 
 ---
@@ -64,6 +65,7 @@
 | **Evidence Tracing** | 回答可展开依据片段，展示本地论文、章节路径、行号、分片、相似度和 snippet，方便核对结论来源。 |
 | **OpenAlex Academic Search** | 支持检索知识库外的论文元数据，包括作者、年份、DOI、venue、开放获取链接，并可将可访问论文加入知识库。 |
 | **Streaming Research UI** | 基于 Streamlit 构建科研分析工作台，支持流式问答、工具开关、分析面板、历史会话和上传入库。 |
+| **Async Ingestion & Lightweight Cache** | 对耗时的 PDF 入库链路提供可选 RabbitMQ worker 模式，并使用 Redis 对用户 query embedding 做 TTL 缓存；缓存不可用时会自动回退到原始生成逻辑。 |
 | **Long-session Memory Compression** | 长轮次论文分析中对上下文进行滚动摘要，保留讨论对象、用户约束、章节范围和来源限制，同时过滤 Planner / Tool 调试字段。 |
 
 ---
@@ -75,6 +77,7 @@
 | **LangGraph over one-shot RAG** | 论文问答经常需要规划、检索、评估、重试和证据检查。相比一次性 RAG chain，LangGraph 更适合管理带状态的多阶段工作流。 |
 | **Planner before Tool Calling** | 不让 Agent 盲目调用所有工具，而是先生成结构化 `IntentPlan`，再由 Source Policy 和 runtime capabilities 约束工具调用，降低工具误用和来源混淆风险。 |
 | **Artifact as Evidence Chunk** | 表格、图示、算法块独立存储，避免长表格稀释正文语义；当问题指向实验指标、流程图或伪代码时，可通过 `artifact_search` 精准召回。 |
+| **Async Ingestion as an Optional Path** | 默认上传链路保持简单可用；当 PDF 解析和 embedding 较慢时，可切换到 RabbitMQ 任务队列，由 worker 后台完成入库并通过任务状态表回传进度。 |
 
 ---
 
@@ -100,7 +103,11 @@ flowchart LR
     UI --> API[FastAPI Backend]
 
     subgraph Ingestion[PDF Ingestion]
-        PDF[PDF Papers] --> Docling[Docling Parser]
+        PDF[PDF Papers] --> Mode{Sync / Async}
+        Mode --> Docling[Docling Parser]
+        Mode --> Queue[RabbitMQ Ingestion Queue]
+        Queue --> Worker[Ingestion Worker]
+        Worker --> Docling
         Docling --> Chunker[Section-aware Chunker]
         Chunker --> Artifact[Table / Figure / Algorithm Artifacts]
         Artifact --> Embed[Embedding]
@@ -108,6 +115,7 @@ flowchart LR
     end
 
     subgraph Runtime[Agentic RAG Runtime]
+        API --> Cache[(Redis Query Embedding Cache)]
         API --> Planner[Source-aware Intent Planner]
         Planner --> Scope[Answer Scope Resolver]
         Scope --> Graph[LangGraph Workflow]
@@ -144,7 +152,11 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    A[Upload PDF] --> B[Docling Parse]
+    A[Upload PDF] --> M{Ingestion Mode}
+    M -->|Sync| B[Docling Parse]
+    M -->|Async| Q[RabbitMQ Queue]
+    Q --> W[Ingestion Worker]
+    W --> B
     B --> C[Markdown-like Document]
     C --> D[Section Detection]
     D --> E[Section-aware Chunks]
@@ -154,7 +166,7 @@ flowchart LR
     G --> H[(documents / chunks)]
 ```
 
-入库阶段会同时保留正文证据和非正文证据：正文 chunk 用于常规论文问答，artifact chunk 用于表格、图示、算法等更细粒度的证据检索。
+入库阶段会同时保留正文证据和非正文证据：正文 chunk 用于常规论文问答，artifact chunk 用于表格、图示、算法等更细粒度的证据检索。对于较耗时的 PDF，系统可以将入库任务投递到 RabbitMQ，由后台 worker 单文件处理并更新任务状态；同步入库方式仍然保留，便于本地调试和小文件快速导入。
 
 ### 2. Agentic RAG 问答流程
 
@@ -176,6 +188,8 @@ Planner 默认遵循最小必要检索原则：能直答的问题不会强行检
 
 在检索阶段，系统会记录每轮 retrieval attempts、top score、result count 和不足原因；当证据不足时，workflow 会进入 query rewrite / retry 分支，并将 rewritten queries 与最终 sources 一起写入 metadata，方便回溯检索行为。对于复杂问题，系统可以结合检索结果摘要判断当前证据是否覆盖问题要求，并在缺少章节、artifact 或目标文档证据时触发定向重查。
 
+查询阶段会优先复用 Redis 中的 query embedding 缓存：同一 embedding 模型下，相同 query 的向量结果具有稳定性，短期缓存可以减少重复 embedding 调用。Redis 只作为轻量缓存层，连接失败时会自动降级为原始 embedding 生成流程。
+
 ---
 
 ## 🧱 技术栈
@@ -186,6 +200,8 @@ Planner 默认遵循最小必要检索原则：能直答的问题不会强行检
 | Backend | FastAPI, Uvicorn, SSE |
 | Agent Workflow | LangChain, LangGraph, Pydantic AI |
 | Vector Store | PostgreSQL 17, pgvector, pg_trgm |
+| Async Task | RabbitMQ, ingestion worker |
+| Cache | Redis query embedding cache |
 | PDF Parsing | Docling |
 | Embedding / LLM | OpenAI-compatible API |
 | Academic Search | OpenAlex |
@@ -231,6 +247,21 @@ GENERAL_WEB_SEARCH_API_KEY=your-web-search-key
 GENERAL_WEB_SEARCH_ENDPOINT=https://example.com/search
 ```
 
+可选工程化配置：
+
+```env
+# RabbitMQ async ingestion
+RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+INGESTION_QUEUE_NAME=ingestion_tasks
+INGESTION_DLQ_NAME=ingestion_tasks_dlq
+INGESTION_MAX_RETRIES=3
+
+# Redis cache
+REDIS_URL=redis://redis:6379/0
+ENABLE_REDIS_CACHE=true
+EMBEDDING_CACHE_TTL_SECONDS=86400
+```
+
 ### 3. 启动服务
 
 ```bash
@@ -245,6 +276,8 @@ docker compose up -d --build
 | FastAPI Backend | http://localhost:8059 |
 | API Docs | http://localhost:8059/docs |
 | PostgreSQL | localhost:6544 |
+| RabbitMQ Management | http://localhost:15672 |
+| Redis | localhost:6379 |
 
 健康检查：
 
@@ -255,7 +288,7 @@ curl http://localhost:8059/health
 
 ### 4. 导入论文
 
-方式一：在 UI 的“上传论文入库”面板上传 PDF。
+方式一：在 UI 的“上传论文入库”面板上传 PDF。小文件可以直接使用同步入库；较大的 PDF 或希望观察后台进度时，可以选择异步入库模式，系统会返回任务状态并由 worker 后台处理。
 
 方式二：将 PDF 放入 `documents/` 后执行：
 
@@ -362,6 +395,8 @@ pytest
 | `POST` | `/search/vector` | 向量检索 |
 | `POST` | `/search/hybrid` | 混合检索 |
 | `GET` | `/documents` | 查看知识库文档 |
+| `POST` | `/ingestion/tasks` | 提交 RabbitMQ 异步入库任务 |
+| `GET` | `/ingestion/tasks/{task_id}` | 查询 RabbitMQ 入库任务状态 |
 | `POST` | `/documents/upload/start` | 异步上传并入库 PDF |
 | `GET` | `/documents/upload/jobs/{job_id}` | 查询入库任务状态 |
 | `POST` | `/documents/upload/jobs/{job_id}/cancel` | 取消入库任务 |
@@ -377,14 +412,14 @@ pytest
 
 ```text
 .
-├── agent/                  # FastAPI、Agent runtime、LangGraph workflow、tools、planner
+├── agent/                  # FastAPI、Agent runtime、LangGraph workflow、tools、planner、cache / queue utilities
 ├── ingestion/              # PDF 解析、section-aware chunking、artifact extraction、embedding 入库
 ├── ui/                     # Streamlit research workspace
 ├── sql/                    # PostgreSQL + pgvector schema and search functions
 ├── evals/                  # Ingestion / Source Policy / Retrieval / Groundedness evals
 ├── tests/                  # Planner、LangGraph、DB、chunker、UI、stream cancel 等测试
 ├── docs/                   # 项目文档与 README 图片资源
-├── docker-compose.yml      # API / UI / PostgreSQL 服务编排
+├── docker-compose.yml      # API / UI / PostgreSQL / RabbitMQ / Redis 服务编排
 ├── Dockerfile
 └── pyproject.toml
 ```
@@ -394,7 +429,7 @@ pytest
 ## 🧭 后续优化方向
 
 - **Page-level Evidence Mapping**：进一步将 evidence 映射到 PDF 页码和页面区域，提升论文核查体验。
-- **Persistent Ingestion Queue**：将入库任务状态迁移到 Redis / Celery 等持久化任务队列，增强生产环境稳定性。
+- **Stronger Ingestion Idempotency**：在现有 RabbitMQ 入库任务基础上继续增强文档 hash 去重、部分写入恢复和 DLQ 监控，提升生产环境稳定性。
 - **Grounded Answer Refinement**：继续优化数字断言、机制推断和证据引用的自动审计与修正能力。
 
 ---

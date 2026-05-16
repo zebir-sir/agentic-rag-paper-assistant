@@ -6,6 +6,7 @@ DROP TABLE IF EXISTS messages CASCADE;
 DROP TABLE IF EXISTS sessions CASCADE;
 DROP TABLE IF EXISTS chunks CASCADE;
 DROP TABLE IF EXISTS documents CASCADE;
+DROP TABLE IF EXISTS ingestion_tasks CASCADE;
 DROP INDEX IF EXISTS idx_chunks_embedding;
 DROP INDEX IF EXISTS idx_chunks_document_id;
 DROP INDEX IF EXISTS idx_documents_metadata;
@@ -62,6 +63,22 @@ CREATE TABLE messages (
 );
 
 CREATE INDEX idx_messages_session_id ON messages (session_id, created_at);
+
+CREATE TABLE ingestion_tasks (
+    task_id TEXT PRIMARY KEY,
+    document_id UUID REFERENCES documents(id) ON DELETE SET NULL,
+    file_path TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'processing', 'done', 'failed')),
+    error_message TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP WITH TIME ZONE,
+    finished_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX idx_ingestion_tasks_status ON ingestion_tasks (status);
+CREATE INDEX idx_ingestion_tasks_created_at ON ingestion_tasks (created_at DESC);
 
 
 CREATE OR REPLACE FUNCTION match_chunks(
@@ -198,6 +215,9 @@ CREATE TRIGGER update_documents_updated_at BEFORE UPDATE ON documents
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 CREATE TRIGGER update_sessions_updated_at BEFORE UPDATE ON sessions
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_ingestion_tasks_updated_at BEFORE UPDATE ON ingestion_tasks
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 CREATE OR REPLACE VIEW document_summaries AS

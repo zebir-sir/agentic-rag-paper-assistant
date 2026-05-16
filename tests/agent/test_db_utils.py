@@ -21,6 +21,11 @@ from agent.db_utils import (
     get_document_chunks,
     test_connection as db_test_connection
 )
+from agent.ingestion_tasks_db import (
+    create_ingestion_task,
+    get_ingestion_task,
+    update_ingestion_task_status,
+)
 
 
 class TestDatabasePool:
@@ -506,3 +511,79 @@ class TestArtifactSearch:
             assert row["document_title"] == "Doc A"
             assert row["document_source"] == "doc-a.md"
             assert "combined_score" in row
+
+
+class TestIngestionTaskManagement:
+    @pytest.mark.asyncio
+    async def test_create_ingestion_task(self):
+        with patch("agent.ingestion_tasks_db.db_pool") as mock_pool:
+            mock_conn = AsyncMock()
+            now = datetime.now(timezone.utc)
+            mock_conn.fetchrow.return_value = {
+                "task_id": "task-1",
+                "document_id": None,
+                "file_path": "/tmp/a.pdf",
+                "status": "queued",
+                "error_message": None,
+                "retry_count": 0,
+                "created_at": now,
+                "updated_at": now,
+                "started_at": None,
+                "finished_at": None,
+            }
+            mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+            mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            task = await create_ingestion_task(task_id="task-1", file_path="/tmp/a.pdf")
+            assert task["task_id"] == "task-1"
+            assert task["status"] == "queued"
+            assert task["file_path"] == "/tmp/a.pdf"
+
+    @pytest.mark.asyncio
+    async def test_get_ingestion_task(self):
+        with patch("agent.ingestion_tasks_db.db_pool") as mock_pool:
+            mock_conn = AsyncMock()
+            now = datetime.now(timezone.utc)
+            mock_conn.fetchrow.return_value = {
+                "task_id": "task-2",
+                "document_id": "11111111-1111-1111-1111-111111111111",
+                "file_path": "/tmp/b.pdf",
+                "status": "processing",
+                "error_message": None,
+                "retry_count": 1,
+                "created_at": now,
+                "updated_at": now,
+                "started_at": now,
+                "finished_at": None,
+            }
+            mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+            mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            task = await get_ingestion_task("task-2")
+            assert task is not None
+            assert task["task_id"] == "task-2"
+            assert task["status"] == "processing"
+
+    @pytest.mark.asyncio
+    async def test_update_ingestion_task_status(self):
+        with patch("agent.ingestion_tasks_db.db_pool") as mock_pool:
+            mock_conn = AsyncMock()
+            now = datetime.now(timezone.utc)
+            mock_conn.fetchrow.return_value = {
+                "task_id": "task-3",
+                "document_id": "22222222-2222-2222-2222-222222222222",
+                "file_path": "/tmp/c.pdf",
+                "status": "done",
+                "error_message": None,
+                "retry_count": 0,
+                "created_at": now,
+                "updated_at": now,
+                "started_at": now,
+                "finished_at": now,
+            }
+            mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+            mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            task = await update_ingestion_task_status(task_id="task-3", status="done", finished_at=now)
+            assert task is not None
+            assert task["status"] == "done"

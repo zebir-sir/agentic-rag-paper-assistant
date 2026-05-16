@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -21,6 +22,7 @@ from .db_utils import (
 )
 from .models import ChunkResult, DocumentMetadata
 from .providers import get_embedding_client, get_embedding_model
+from .cache_utils import cache_get_json, cache_set_json, make_cache_key
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -29,6 +31,7 @@ embedding_client = get_embedding_client()
 EMBEDDING_MODEL = get_embedding_model()
 EMBEDDING_TIMEOUT_SECONDS = float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "20"))
 LOCAL_SEARCH_TIMEOUT_SECONDS = float(os.getenv("LOCAL_SEARCH_TIMEOUT_SECONDS", "30"))
+EMBEDDING_CACHE_TTL_SECONDS = int(os.getenv("EMBEDDING_CACHE_TTL_SECONDS", "86400"))
 OPENALEX_WORKS_URL = "https://api.openalex.org/works"
 DEFAULT_GENERAL_WEB_ENDPOINTS = {
     "tavily": "https://api.tavily.com/search",
@@ -39,6 +42,15 @@ DEFAULT_GENERAL_WEB_ENDPOINTS = {
 
 
 async def generate_embedding(text: str) -> List[float]:
+    use_cache = _as_bool_env("ENABLE_REDIS_CACHE", True)
+    cache_key = None
+    if use_cache:
+        query_hash = hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
+        cache_key = make_cache_key("embedding", EMBEDDING_MODEL, query_hash)
+        cached = await cache_get_json(cache_key)
+        if isinstance(cached, list) and cached:
+            return cached
+
     try:
         response = await asyncio.wait_for(
             embedding_client.embeddings.create(
@@ -49,7 +61,10 @@ async def generate_embedding(text: str) -> List[float]:
             ),
             timeout=EMBEDDING_TIMEOUT_SECONDS,
         )
-        return response.data[0].embedding
+        embedding = response.data[0].embedding
+        if use_cache and cache_key:
+            await cache_set_json(cache_key, embedding, EMBEDDING_CACHE_TTL_SECONDS)
+        return embedding
     except Exception as e:
         logger.error(f"Failed to generate embedding: {e}")
         raise

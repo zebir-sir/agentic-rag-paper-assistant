@@ -3,9 +3,11 @@ import base64
 import binascii
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
@@ -15,9 +17,18 @@ from typing import Any, Dict, Optional
 from urllib.request import Request, urlopen
 
 from fastapi import HTTPException
+from .ingestion_tasks_db import (
+    create_ingestion_task,
+    update_ingestion_task_status,
+)
+from .rabbitmq_producer import publish_ingestion_task
 
 DOCUMENT_UPLOAD_MAX_BYTES = int(os.getenv("DOCUMENT_UPLOAD_MAX_BYTES", str(30 * 1024 * 1024)))
 MAX_INGESTION_JOBS = int(os.getenv("MAX_INGESTION_JOBS", "50"))
+_DOCUMENT_ID_PATTERN = re.compile(
+    r"Saved document to PostgreSQL with ID:\s*([0-9a-fA-F-]{36})",
+    flags=re.IGNORECASE,
+)
 
 
 @dataclass
@@ -161,6 +172,42 @@ async def _run_ingestion_for_directory(import_dir: Path, *, fast: bool = True) -
     )
 
 
+def _extract_document_id_from_ingestion_output(stdout: str, stderr: str) -> Optional[str]:
+    text = f"{stdout}\n{stderr}"
+    match = _DOCUMENT_ID_PATTERN.search(text)
+    if not match:
+        return None
+    return match.group(1)
+
+
+async def ingest_saved_pdf_file(file_path: str, *, fast: bool = True) -> Dict[str, Any]:
+    path = Path(file_path)
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(f"File not found: {file_path}")
+    # Isolate this task to a single staged file to avoid ingesting sibling PDFs.
+    with tempfile.TemporaryDirectory(prefix="single_ingest_") as tmp_dir:
+        tmp_dir_path = Path(tmp_dir)
+        staged_name = f"{uuid.uuid4().hex[:8]}_{path.name}"
+        staged_path = tmp_dir_path / staged_name
+        shutil.copy2(path, staged_path)
+
+        process = await _run_ingestion_for_directory(tmp_dir_path, fast=fast)
+        stdout = process.stdout or ""
+        stderr = process.stderr or ""
+        if process.returncode != 0:
+            error_text = (stderr or stdout or "Ingestion process failed").strip()
+            raise RuntimeError(error_text[-2000:])
+
+        return {
+            "returncode": process.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "document_id": _extract_document_id_from_ingestion_output(stdout, stderr),
+            "document_id_source": "ingestion_log",
+            "staged_file_name": staged_name,
+        }
+
+
 async def _run_ingestion_job(job_id: str) -> None:
     async with INGESTION_JOBS_LOCK:
         job = INGESTION_JOBS.get(job_id)
@@ -297,13 +344,14 @@ async def run_sync_upload_ingestion(payload: Dict[str, Any]) -> Dict[str, Any]:
     safe_filename, import_dir, target_path = _make_upload_paths(filename_raw)
     target_path.write_bytes(data)
 
-    process = await _run_ingestion_for_directory(import_dir, fast=fast)
-    if process.returncode != 0:
+    try:
+        ingestion_result = await ingest_saved_pdf_file(str(target_path), fast=fast)
+    except RuntimeError as exc:
         raise HTTPException(
             status_code=500,
             detail={
                 "message": "Ingestion failed",
-                "stderr": process.stderr[-2000:],
+                "stderr": str(exc),
             },
         )
 
@@ -311,9 +359,47 @@ async def run_sync_upload_ingestion(payload: Dict[str, Any]) -> Dict[str, Any]:
         "status": "success",
         "filename": safe_filename,
         "file_path": str(target_path),
-        "ingestion_output": process.stdout[-2000:],
+        "ingestion_output": str(ingestion_result.get("stdout") or "")[-2000:],
         "fast": fast,
     }
+
+
+async def submit_async_ingestion_task(payload: Dict[str, Any]) -> Dict[str, Any]:
+    filename_raw, data, _fast = _validate_and_decode_upload_payload(payload)
+    _safe_filename, _import_dir, target_path = _make_upload_paths(filename_raw)
+    target_path.write_bytes(data)
+
+    task_id = uuid.uuid4().hex
+    task = await create_ingestion_task(
+        task_id=task_id,
+        document_id=None,
+        file_path=str(target_path),
+        status="queued",
+    )
+
+    try:
+        await publish_ingestion_task(
+            task_id=task["task_id"],
+            document_id=task.get("document_id"),
+            file_path=task["file_path"],
+        )
+    except Exception as exc:
+        updated = await update_ingestion_task_status(
+            task_id=task_id,
+            status="failed",
+            error_message=str(exc),
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "Failed to publish ingestion task to RabbitMQ",
+                "task_id": task_id,
+                "error": str(exc),
+                "task": updated,
+            },
+        )
+
+    return task
 
 
 async def get_upload_ingestion_job(job_id: str) -> Dict[str, Any]:

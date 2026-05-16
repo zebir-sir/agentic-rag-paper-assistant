@@ -21,6 +21,9 @@ try:
         stream_chat,
         cancel_ingestion_job,
         fetch_ingestion_job,
+        get_ingestion_task,
+        map_async_ingestion_task_status,
+        submit_async_ingestion_task,
         start_pdf_ingestion,
     )
     from ui.components import inject_styles, render_analysis_panel, render_sources
@@ -39,6 +42,9 @@ except ImportError:  # pragma: no cover - streamlit script mode
         stream_chat,
         cancel_ingestion_job,
         fetch_ingestion_job,
+        get_ingestion_task,
+        map_async_ingestion_task_status,
+        submit_async_ingestion_task,
         start_pdf_ingestion,
     )
     from components import inject_styles, render_analysis_panel, render_sources
@@ -76,6 +82,9 @@ def ensure_app_state() -> None:
         "ingestion_job_id": None,
         "ingestion_job_filename": None,
         "ingestion_job_done": False,
+        "async_ingestion_task_id": None,
+        "async_ingestion_filename": None,
+        "async_ingestion_done": False,
         "confirm_delete_session_id": None,
     }
     for key, default in defaults.items():
@@ -257,6 +266,12 @@ def render_welcome_guide() -> None:
 
 
 def _render_upload_ingest_panel(base_url: str) -> None:
+    ingestion_mode = st.radio(
+        "Ingestion mode",
+        options=["Sync (existing)", "Async (RabbitMQ)"],
+        horizontal=True,
+        key="kb_ingestion_mode",
+    )
     st.markdown("#### 上传论文入库")
     uploaded_pdf = st.file_uploader("选择 PDF 文件", type=["pdf"], key="kb_pdf_uploader")
     fast_ingest = st.checkbox(
@@ -282,6 +297,24 @@ def _render_upload_ingest_panel(base_url: str) -> None:
             st.rerun()
         else:
             st.error(msg)
+    if ingestion_mode == "Async (RabbitMQ)":
+        if st.button("Async upload and ingest", disabled=uploaded_pdf is None, key="kb_upload_submit_async"):
+            with st.spinner("Submitting async ingestion task..."):
+                ok_async, msg_async, payload_async = submit_async_ingestion_task(
+                    base_url,
+                    uploaded_pdf.name if uploaded_pdf is not None else "",
+                    uploaded_pdf.getvalue() if uploaded_pdf is not None else b"",
+                    fast=fast_ingest,
+                )
+            if ok_async:
+                st.success(msg_async)
+                st.session_state.async_ingestion_task_id = payload_async.get("task_id")
+                st.session_state.async_ingestion_filename = uploaded_pdf.name if uploaded_pdf is not None else ""
+                st.session_state.async_ingestion_done = False
+                st.caption(f"Task ID: {payload_async.get('task_id')}")
+                st.rerun()
+            else:
+                st.error(msg_async)
     st.divider()
 
 
@@ -348,6 +381,58 @@ if hasattr(st, "fragment"):
 else:
     def render_ingestion_progress(base_url: str) -> None:
         _render_ingestion_progress_body(base_url)
+
+
+def _render_async_ingestion_progress_body(base_url: str) -> None:
+    task_id = st.session_state.get("async_ingestion_task_id")
+    if not task_id:
+        return
+
+    ok, msg, payload = get_ingestion_task(base_url, str(task_id))
+    if not ok:
+        st.warning(msg)
+        if st.button("Close async task notice", key="close_async_ingest_status_error"):
+            st.session_state.async_ingestion_task_id = None
+            st.session_state.async_ingestion_filename = None
+            st.session_state.async_ingestion_done = False
+            st.rerun()
+        return
+
+    status = str(payload.get("status") or "")
+    error_message = str(payload.get("error_message") or "")
+    filename = str(st.session_state.get("async_ingestion_filename") or payload.get("file_path") or "")
+    st.caption(f"Async ingestion file: {filename}")
+    st.caption(f"Task ID: {task_id}")
+    st.info(map_async_ingestion_task_status(status, error_message))
+
+    if status in {"queued", "processing"}:
+        if not hasattr(st, "fragment"):
+            if st.button("Refresh async task status", key=f"refresh_async_ingest_{task_id}"):
+                st.rerun()
+        return
+
+    if status == "done":
+        st.success("Async ingestion done. You can start asking questions.")
+    elif status == "failed":
+        st.error("Async ingestion failed.")
+        if error_message:
+            st.code(error_message[:500])
+
+    st.session_state.async_ingestion_done = True
+    if st.button("Close async task notice", key=f"close_async_ingest_{task_id}"):
+        st.session_state.async_ingestion_task_id = None
+        st.session_state.async_ingestion_filename = None
+        st.session_state.async_ingestion_done = False
+        st.rerun()
+
+
+if hasattr(st, "fragment"):
+    @st.fragment(run_every="2s")
+    def render_async_ingestion_progress(base_url: str) -> None:
+        _render_async_ingestion_progress_body(base_url)
+else:
+    def render_async_ingestion_progress(base_url: str) -> None:
+        _render_async_ingestion_progress_body(base_url)
 
 
 def _render_analysis_panel_compact(base_url: str, backend_health_ok: bool) -> None:
@@ -547,6 +632,7 @@ for idx, msg in enumerate(st.session_state.messages):
                 render_sources(sources, resolved_base_url, f"hist_{idx}", add_openalex_source_to_kb)
 
 render_ingestion_progress(resolved_base_url)
+render_async_ingestion_progress(resolved_base_url)
 
 render_input_toolbar(
     resolved_base_url=resolved_base_url,

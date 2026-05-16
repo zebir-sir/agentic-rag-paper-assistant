@@ -509,3 +509,66 @@ def format_session_time(iso_value: str) -> str:
     except Exception:
         return ""
 
+
+def submit_async_ingestion_task(
+    base_url: str,
+    filename: str,
+    file_bytes: bytes,
+    fast: bool = True,
+) -> tuple[bool, str, Dict[str, Any]]:
+    try:
+        content_base64 = base64.b64encode(file_bytes).decode("ascii")
+        resp = requests.post(
+            f"{base_url}/ingestion/tasks",
+            json={
+                "filename": filename,
+                "content_base64": content_base64,
+                "fast": fast,
+            },
+            timeout=120,
+        )
+        if resp.status_code == 200:
+            payload = resp.json()
+            if payload.get("task_id") and payload.get("status"):
+                return True, "Async ingestion task submitted", payload
+            return False, "Async ingestion task creation failed: invalid response", {}
+        try:
+            detail = (resp.json() or {}).get("detail")
+        except Exception:
+            detail = resp.text
+        return False, f"Async ingestion task creation failed: {detail}", {}
+    except Exception as e:
+        return False, f"Async ingestion task creation failed: {e}", {}
+
+
+def get_ingestion_task(base_url: str, task_id: str) -> tuple[bool, str, Dict[str, Any]]:
+    try:
+        resp = requests.get(f"{base_url}/ingestion/tasks/{task_id}", timeout=10)
+        if resp.status_code == 200:
+            return True, "ok", resp.json()
+        if resp.status_code == 404:
+            return False, "Task not found", {}
+        try:
+            detail = (resp.json() or {}).get("detail")
+        except Exception:
+            detail = resp.text
+        return False, f"Query ingestion task failed: {detail}", {}
+    except Exception as e:
+        return False, f"Query ingestion task failed: {e}", {}
+
+
+def map_async_ingestion_task_status(status: str, error_message: str = "") -> str:
+    status_key = str(status or "").strip().lower()
+    if status_key == "queued":
+        return "Task queued. Waiting for worker..."
+    if status_key == "processing":
+        return "Worker is processing PDF/chunking/embedding..."
+    if status_key == "done":
+        return "Ingestion done. You can start asking questions."
+    if status_key == "failed":
+        err = str(error_message or "").strip()
+        if err:
+            return f"Ingestion failed: {err[:200]}"
+        return "Ingestion failed."
+    return f"Unknown task status: {status}"
+

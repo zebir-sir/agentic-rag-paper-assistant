@@ -1,7 +1,10 @@
 from ui.api_client import (
     cancel_chat_stream,
     clean_assistant_display_text,
+    get_ingestion_task,
+    map_async_ingestion_task_status,
     map_status_text,
+    submit_async_ingestion_task,
     start_pdf_ingestion,
     should_display_status_event,
 )
@@ -109,3 +112,54 @@ def test_cancel_chat_stream_parses_not_found(monkeypatch):
     assert ok is True
     assert status == "not_found"
     assert payload["run_id"] == "r2"
+
+
+def test_submit_async_ingestion_task_payload(monkeypatch):
+    captured = {}
+
+    class DummyResp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"task_id": "task-1", "status": "queued", "file_path": "documents/ui_uploads/a.pdf"}
+
+    def fake_post(url, json=None, timeout=0):
+        captured["url"] = url
+        captured["json"] = json or {}
+        captured["timeout"] = timeout
+        return DummyResp()
+
+    monkeypatch.setattr("ui.api_client.requests.post", fake_post)
+    ok, _, payload = submit_async_ingestion_task("http://localhost:8059", "paper.pdf", b"%PDF test", fast=True)
+
+    assert ok is True
+    assert payload["task_id"] == "task-1"
+    assert captured["url"].endswith("/ingestion/tasks")
+    assert captured["json"]["filename"] == "paper.pdf"
+    assert captured["json"]["fast"] is True
+    assert "content_base64" in captured["json"]
+
+
+def test_get_ingestion_task(monkeypatch):
+    class DummyResp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"task_id": "task-2", "status": "processing"}
+
+    monkeypatch.setattr("ui.api_client.requests.get", lambda *args, **kwargs: DummyResp())
+    ok, msg, payload = get_ingestion_task("http://localhost:8059", "task-2")
+
+    assert ok is True
+    assert msg == "ok"
+    assert payload["status"] == "processing"
+
+
+def test_map_async_ingestion_task_status():
+    assert "queued" in map_async_ingestion_task_status("queued").lower()
+    assert "processing" in map_async_ingestion_task_status("processing").lower()
+    assert "done" in map_async_ingestion_task_status("done").lower()
+    failed = map_async_ingestion_task_status("failed", "boom")
+    assert "boom" in failed.lower()

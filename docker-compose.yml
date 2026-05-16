@@ -1,4 +1,32 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: redis_main1
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq_main1
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   postgres:
     image: pgvector/pgvector:pg17
     container_name: postgres_pgvector_main1
@@ -37,6 +65,24 @@ services:
       start_period: 20s
     depends_on:
       postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ingestion-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agent_ingestion_worker_main1
+    command: python -m agent.ingestion_worker
+    env_file: .env
+    environment:
+      PYTHONPATH: /app
+      INGESTION_MAX_RETRIES: ${INGESTION_MAX_RETRIES:-3}
+      INGESTION_DLQ_NAME: ${INGESTION_DLQ_NAME:-ingestion_tasks_dlq}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
     restart: unless-stopped
 
