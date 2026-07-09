@@ -49,6 +49,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: api
     container_name: agent_api_main1
     command: uvicorn agent.api:app --host ${APP_HOST} --port ${APP_PORT}
     ports:
@@ -72,6 +73,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: worker
     container_name: agent_ingestion_worker_main1
     command: python -m agent.ingestion_worker
     env_file: .env
@@ -90,6 +92,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: ui
     container_name: agent_ui_main1
     command: streamlit run ui/app.py --server.port=${SERVER_PORT} --server.address=${SERVER_HOST}
     ports:

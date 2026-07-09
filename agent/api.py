@@ -9,11 +9,20 @@ import uuid
 import re
 import asyncio
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from dotenv import load_dotenv
 
+from .http_errors import register_exception_handlers
+from .http_middleware import register_http_middleware
+from .health_runtime import APP_VERSION, build_readiness_status
+from .cache_utils import close_redis_client, startup_redis_client
+from .runtime_config import build_runtime_diagnostics
+from .runtime_metrics import get_runtime_metrics_snapshot
+from .runtime_models import HttpMetricsSnapshot, RuntimeDiagnostics
+from .chat_metrics_models import ChatMetricsSnapshot
+from .chat_metrics_runtime import get_chat_metrics_snapshot, record_chat_request_metric
 from .agent_runtime import AgentDependencies
 from .agent_runner import (
     run_agent,
@@ -70,13 +79,14 @@ from .models import (
     ChatResponse,
     SearchRequest,
     SearchResponse,
-    ErrorResponse,
     HealthStatus,
+    ReadinessStatus,
     ToolCall,
     EvidenceSource,
     SessionListResponse,
     SessionListItem,
     SessionMessagesResponse,
+    SessionMemorySnapshot,
     ChatMessageItem,
     IngestionTaskResponse,
 )
@@ -101,6 +111,15 @@ from .memory_utils import (
     build_context_without_compaction,
     sanitize_history_messages,
 )
+from .memory_runtime import build_session_memory_snapshot
+from .dialog_policy import classify_dialog_turn
+from .history_resolver import resolve_history_query
+from .answer_review_runtime import review_generated_answer
+from .simple_chat_runtime import (
+    SimpleChatDecision,
+    choose_simple_chat_strategy,
+    run_simple_chat_runtime,
+)
 from .ingestion_jobs import (
     add_openalex_file_to_kb,
     run_sync_upload_ingestion,
@@ -116,6 +135,7 @@ from .stream_registry import (
     get_stream_run,
 )
 from .warning_text import clean_legacy_warning_text
+from .request_context import get_request_id
 
 load_dotenv()
 
@@ -159,6 +179,47 @@ def _append_react_instruction(full_prompt: str, enabled: bool) -> str:
     if not enabled:
         return full_prompt
     return f"{full_prompt}\n\n[Runtime deep-analysis instruction]\n{REACT_RUNTIME_INSTRUCTION}"
+
+
+def _build_conversation_carryover_block(
+    *,
+    original_query: str,
+    resolved_query: str,
+    topic_hint: str,
+    recent_history_summary: str,
+    dialog_act: str,
+    carry_context: bool,
+    response_style: str,
+) -> str:
+    if not any(
+        [
+            carry_context,
+            resolved_query and resolved_query != original_query,
+            topic_hint,
+            recent_history_summary,
+        ]
+    ):
+        return ""
+
+    lines = [
+        "[Conversation carry-over]",
+        f"- dialog_act: {dialog_act or 'unknown'}",
+        f"- carry_context: {'true' if carry_context else 'false'}",
+        f"- response_style: {response_style or 'normal'}",
+    ]
+    if topic_hint:
+        lines.append(f"- topic_hint: {topic_hint}")
+    if resolved_query:
+        lines.append(f"- resolved_query_for_retrieval: {resolved_query}")
+    if recent_history_summary:
+        lines.append(f"- recent_history_summary: {recent_history_summary}")
+    lines.extend(
+        [
+            "Interpret short references such as 这个/它/表/图/算法 using the resolved query and topic hint when planning retrieval.",
+            "Answer naturally to the current user turn; do not say you are using hidden conversation carry-over logic.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _is_explicit_general_web_request(message: str) -> bool:
@@ -313,6 +374,7 @@ async def lifespan(app: FastAPI):
     try:
         await initialize_database()
         await execute_init_sql("sql/schema.sql")
+        await startup_redis_client()
         logger.info("Database initialized")
         db_ok = await test_connection()
         if not db_ok:
@@ -324,6 +386,7 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("Shutting down system...")
     try:
+        await close_redis_client()
         await close_database()
         logger.info("Connections closed")
     except Exception as e:
@@ -344,6 +407,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+register_http_middleware(app)
+register_exception_handlers(app)
 
 
 async def get_or_create_session(request: ChatRequest) -> str:
@@ -474,6 +539,7 @@ async def _prepare_agent_prompt(
         "compression_count": context_result.compression_count,
         "compacted_message_count": context_result.compacted_message_count,
         "compression_needed": compression_needed,
+        "history_messages": history_messages,
     }
 
 
@@ -540,6 +606,53 @@ def extract_evidence_sources(
     return local_sources[:local_limit] + web_sources[:web_limit]
 
 
+def _count_source_types(sources: List[EvidenceSource]) -> tuple[int, int]:
+    local_source_count = 0
+    web_source_count = 0
+    for source in sources:
+        source_type = str(getattr(source, "source_type", "") or "").lower()
+        if source_type == "web":
+            web_source_count += 1
+        else:
+            local_source_count += 1
+    return local_source_count, web_source_count
+
+
+def _emit_chat_request_metric(
+    *,
+    request_id: Optional[str],
+    session_id: str,
+    route: str,
+    status: str,
+    response_backend: str,
+    requested_search_type: str,
+    effective_search_type: str,
+    use_web_search: bool,
+    use_react: bool,
+    compression_used: bool,
+    tools_used: List[ToolCall],
+    sources: List[EvidenceSource],
+    response_text: str,
+) -> None:
+    local_source_count, web_source_count = _count_source_types(sources)
+    record_chat_request_metric(
+        request_id=request_id,
+        session_id=session_id,
+        route=route,
+        status=status,
+        response_backend=response_backend,
+        requested_search_type=requested_search_type,
+        effective_search_type=effective_search_type,
+        use_web_search=use_web_search,
+        use_react=use_react,
+        compression_used=compression_used,
+        tool_call_count=len(tools_used),
+        local_source_count=local_source_count,
+        web_source_count=web_source_count,
+        response_chars=len(str(response_text or "")),
+    )
+
+
 async def save_conversation_turn(
     session_id: str,
     user_message: str,
@@ -594,6 +707,7 @@ class ChatRuntime:
     explicit_general_web_request: bool
     is_local_question: bool
     has_local_evidence: bool
+    simple_chat_decision: SimpleChatDecision
     workflow_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -620,10 +734,26 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
         user_id=request.user_id,
         user_message=request.message,
     )
+    history_messages = list(context_payload.get("history_messages") or [])
+    history_resolution = resolve_history_query(
+        latest_query=request.message,
+        history_messages=history_messages,
+    )
+    dialog_policy = classify_dialog_turn(
+        latest_query=request.message,
+        history_messages=history_messages,
+    )
     is_general_question = _is_general_algorithm_question(request.message)
     may_need_general_web_search = _may_need_general_web_search(request.message)
     explicit_general_web_request = _is_explicit_general_web_request(request.message)
     is_local_question = _is_local_kb_question(request.message)
+    simple_chat_decision = choose_simple_chat_strategy(
+        message=request.message,
+        resolved_query=history_resolution.resolved_query or request.message,
+        is_local_question=is_local_question,
+        use_react=bool(request.use_react),
+        use_web_search=effective_use_web_search,
+    )
 
     local_context = ""
     if is_local_question:
@@ -643,6 +773,18 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
     base_context_prompt = context_payload["full_prompt"]
     langgraph_context_prompt = base_context_prompt
     full_prompt = base_context_prompt
+    carryover_block = _build_conversation_carryover_block(
+        original_query=history_resolution.original_query,
+        resolved_query=history_resolution.resolved_query,
+        topic_hint=history_resolution.topic_hint,
+        recent_history_summary=history_resolution.recent_history_summary,
+        dialog_act=dialog_policy.dialog_act,
+        carry_context=dialog_policy.carry_context,
+        response_style=dialog_policy.response_style,
+    )
+    if carryover_block:
+        langgraph_context_prompt = f"{langgraph_context_prompt}\n\n{carryover_block}"
+        full_prompt = f"{full_prompt}\n\n{carryover_block}"
     full_prompt = _append_react_instruction(full_prompt, bool(request.use_react))
     if local_context:
         full_prompt = f"{full_prompt}\n\n{local_context}"
@@ -670,7 +812,20 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
         explicit_general_web_request=explicit_general_web_request,
         is_local_question=is_local_question,
         has_local_evidence=has_local_evidence,
-        workflow_metadata={},
+        simple_chat_decision=simple_chat_decision,
+        workflow_metadata={
+            "dialog_act": dialog_policy.dialog_act,
+            "dialog_reason": dialog_policy.reason,
+            "dialog_response_style": dialog_policy.response_style,
+            "carry_context": dialog_policy.carry_context,
+            "resolved_query": history_resolution.resolved_query,
+            "history_resolution_used": history_resolution.used_history,
+            "history_resolution_reason": history_resolution.reason,
+            "history_topic_hint": history_resolution.topic_hint,
+            "simple_chat_candidate": simple_chat_decision.enabled,
+            "simple_chat_candidate_mode": simple_chat_decision.mode,
+            "simple_chat_candidate_reason": simple_chat_decision.reason,
+        },
     )
 
 
@@ -697,9 +852,23 @@ async def execute_prepared_chat_runtime(
             )
 
         openalex_first_result = None
-        if runtime.explicit_web_request:
+        simple_chat_result = None
+        if runtime.simple_chat_decision.enabled:
+            simple_chat_result = await run_simple_chat_runtime(
+                deps=deps,
+                user_message=message,
+                decision=runtime.simple_chat_decision,
+                response_style=str(runtime.workflow_metadata.get("dialog_response_style") or "normal"),
+            )
+        if runtime.explicit_web_request and simple_chat_result is None:
             openalex_first_result = await _run_openalex_first_if_needed(message=message, deps=deps)
-        if openalex_first_result is not None:
+        if simple_chat_result is not None:
+            response = simple_chat_result.message
+            tools_used = list(simple_chat_result.tools_used or [])
+            sources = list(simple_chat_result.sources or [])
+            workflow_metadata = dict(simple_chat_result.metadata or {})
+            response_backend = "simple_chat_runtime"
+        elif openalex_first_result is not None:
             response, tools_used, sources, workflow_metadata = openalex_first_result
             response_backend = "openalex_first"
         else:
@@ -747,11 +916,17 @@ async def execute_prepared_chat_runtime(
             clean_markdown_spacing(response),
             drop_warning=bool(workflow_metadata.get("retrieval_skipped_by_planner") and workflow_metadata.get("direct_answer_allowed")),
         )
+        review_result = review_generated_answer(
+            answer=response,
+            sources=sources,
+            is_local_question=runtime.is_local_question,
+        )
+        response = review_result.revised_answer
         sources_dict = [source.model_dump() for source in sources]
 
         safe_workflow_metadata = {
             k: v
-            for k, v in workflow_metadata.items()
+            for k, v in {**runtime.workflow_metadata, **workflow_metadata}.items()
             if k
             not in {
                 "requested_search_type",
@@ -767,6 +942,11 @@ async def execute_prepared_chat_runtime(
         retrieval_error = (deps.search_preferences or {}).get("retrieval_error")
         if retrieval_error:
             safe_workflow_metadata["retrieval_error"] = retrieval_error
+        safe_workflow_metadata["answer_review_reviewed"] = review_result.reviewed
+        safe_workflow_metadata["answer_review_action"] = review_result.review_action
+        safe_workflow_metadata["answer_review_risk"] = review_result.unsupported_claim_risk
+        safe_workflow_metadata["answer_review_reason"] = review_result.reason
+        safe_workflow_metadata["answer_review_note_count"] = len(review_result.unsupported_claim_notes or [])
 
         if save_conversation:
             if str(response or "").strip():
@@ -897,7 +1077,7 @@ async def health_check():
             status=status,
             database=db_status,
             llm_connection=llm_ok,
-            version="1.1.0",
+            version=APP_VERSION,
             timestamp=datetime.now(),
         )
     except Exception as e:
@@ -909,9 +1089,14 @@ async def health_check():
 async def health_live():
     return {
         "status": "ok",
-        "version": "1.1.0",
+        "version": APP_VERSION,
         "timestamp": datetime.now(),
     }
+
+
+@app.get("/health/ready", response_model=ReadinessStatus)
+async def health_ready():
+    return ReadinessStatus(**(await build_readiness_status()))
 
 
 @app.get("/openalex/status")
@@ -927,8 +1112,25 @@ async def web_search_status():
     }
 
 
+@app.get("/system/runtime", response_model=RuntimeDiagnostics)
+async def system_runtime():
+    return RuntimeDiagnostics(**build_runtime_diagnostics())
+
+
+@app.get("/system/metrics", response_model=HttpMetricsSnapshot)
+async def system_metrics():
+    return HttpMetricsSnapshot(**get_runtime_metrics_snapshot())
+
+
+@app.get("/system/chat-metrics", response_model=ChatMetricsSnapshot)
+async def system_chat_metrics():
+    return ChatMetricsSnapshot(**get_chat_metrics_snapshot())
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
+    request_id = get_request_id()
+    session_id = request.session_id or ""
     try:
         session_id = await get_or_create_session(request)
         request.session_id = session_id
@@ -945,6 +1147,21 @@ async def chat(request: ChatRequest):
         ) = await execute_prepared_chat_runtime(
             request.message,
             runtime,
+        )
+        _emit_chat_request_metric(
+            request_id=request_id,
+            session_id=session_id,
+            route="/chat",
+            status="success",
+            response_backend=response_backend,
+            requested_search_type=requested_search_type,
+            effective_search_type=effective_search_type,
+            use_web_search=runtime.effective_use_web_search,
+            use_react=runtime.use_react,
+            compression_used=compression_used,
+            tools_used=tools_used,
+            sources=sources,
+            response_text=response,
         )
         return ChatResponse(
             message=response,
@@ -965,6 +1182,21 @@ async def chat(request: ChatRequest):
         )
     except Exception as e:
         logger.error(f"Chat endpoint failed: {e}")
+        _emit_chat_request_metric(
+            request_id=request_id,
+            session_id=session_id,
+            route="/chat",
+            status="error",
+            response_backend=get_agent_backend(),
+            requested_search_type=_resolve_search_type(request.search_type),
+            effective_search_type=_resolve_search_type(request.search_type),
+            use_web_search=bool(request.use_web_search),
+            use_react=bool(request.use_react),
+            compression_used=False,
+            tools_used=[],
+            sources=[],
+            response_text="",
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -972,6 +1204,7 @@ async def chat(request: ChatRequest):
 async def chat_stream(request: ChatRequest):
     try:
         session_id = await get_or_create_session(request)
+        request_id = get_request_id()
         run_id = uuid.uuid4().hex
         logger.info("stream started: session_id=%s run_id=%s", session_id, run_id)
 
@@ -1073,6 +1306,102 @@ async def chat_stream(request: ChatRequest):
                         "use_react": use_react,
                     },
                 )
+
+                if runtime.simple_chat_decision.enabled:
+                    yield sse_event("status", content="Running lightweight local QA...")
+                    simple_chat_result = await run_simple_chat_runtime(
+                        deps=deps,
+                        user_message=request.message,
+                        decision=runtime.simple_chat_decision,
+                        response_style=str(runtime.workflow_metadata.get("dialog_response_style") or "normal"),
+                    )
+                    if simple_chat_result is not None:
+                        response_backend = "simple_chat_runtime"
+                        stream_backend = "simple_chat_runtime"
+                        full_response = simple_chat_result.message
+                        tools_used = list(simple_chat_result.tools_used or [])
+                        sources = _dedupe_sources(list(simple_chat_result.sources or []))
+                        workflow_metadata = dict(simple_chat_result.metadata or {})
+                        full_response = clean_legacy_warning_text(clean_markdown_spacing(full_response))
+                        review_result = review_generated_answer(
+                            answer=full_response,
+                            sources=sources,
+                            is_local_question=is_local_question,
+                        )
+                        full_response = review_result.revised_answer
+                        yield sse_event("text", content=full_response)
+                        sources_data = [source.model_dump() for source in sources]
+                        safe_workflow_metadata = {
+                            k: v
+                            for k, v in {**runtime.workflow_metadata, **workflow_metadata}.items()
+                            if k
+                            not in {
+                                "requested_search_type",
+                                "effective_search_type",
+                                "compression_used",
+                                "use_web_search",
+                                "use_react",
+                                "agent_backend",
+                                "stream_backend",
+                                "sources",
+                                "tool_calls",
+                            }
+                        }
+                        safe_workflow_metadata["answer_review_reviewed"] = review_result.reviewed
+                        safe_workflow_metadata["answer_review_action"] = review_result.review_action
+                        safe_workflow_metadata["answer_review_risk"] = review_result.unsupported_claim_risk
+                        safe_workflow_metadata["answer_review_reason"] = review_result.reason
+                        safe_workflow_metadata["answer_review_note_count"] = len(review_result.unsupported_claim_notes or [])
+                        if tools_used:
+                            yield sse_event(
+                                "tools",
+                                tools=[
+                                    {
+                                        "tool_name": tool.tool_name,
+                                        "args": tool.args,
+                                        "tool_call_id": tool.tool_call_id,
+                                    }
+                                    for tool in tools_used
+                                ],
+                            )
+                        yield sse_event("sources", sources=sources_data)
+                        await add_message(
+                            session_id=session_id,
+                            role="assistant",
+                            content=full_response,
+                            metadata={
+                                "run_id": run_id,
+                                "streamed": True,
+                                "tool_calls": len(tools_used),
+                                "compression_used": compression_used,
+                                "requested_search_type": requested_search_type,
+                                "effective_search_type": effective_search_type,
+                                "sources": sources_data,
+                                "use_web_search": deps.use_web_search,
+                                "use_react": use_react,
+                                "agent_backend": response_backend,
+                                "stream_backend": stream_backend,
+                                **safe_workflow_metadata,
+                            },
+                        )
+                        await refresh_session_metadata(session_id)
+                        _emit_chat_request_metric(
+                            request_id=request_id,
+                            session_id=session_id,
+                            route="/chat/stream",
+                            status="success",
+                            response_backend=response_backend,
+                            requested_search_type=requested_search_type,
+                            effective_search_type=effective_search_type,
+                            use_web_search=bool(deps.use_web_search),
+                            use_react=use_react,
+                            compression_used=compression_used,
+                            tools_used=tools_used,
+                            sources=sources,
+                            response_text=full_response,
+                        )
+                        yield sse_event("end")
+                        return
 
                 if explicit_web_request:
                     yield sse_event("status", content="Searching OpenAlex...")
@@ -1366,10 +1695,21 @@ async def chat_stream(request: ChatRequest):
                     clean_markdown_spacing(full_response),
                     drop_warning=bool(workflow_metadata.get("retrieval_skipped_by_planner") and workflow_metadata.get("direct_answer_allowed")),
                 )
+                review_result = review_generated_answer(
+                    answer=full_response,
+                    sources=sources,
+                    is_local_question=is_local_question,
+                )
+                reviewed_response = review_result.revised_answer
+                if reviewed_response != full_response and reviewed_response.startswith(full_response):
+                    appended_suffix = reviewed_response[len(full_response):]
+                    if appended_suffix.strip():
+                        yield sse_event("text", content=appended_suffix)
+                full_response = reviewed_response
                 sources_data = [source.model_dump() for source in sources]
                 safe_workflow_metadata = {
                     k: v
-                    for k, v in workflow_metadata.items()
+                    for k, v in {**runtime.workflow_metadata, **workflow_metadata}.items()
                     if k
                     not in {
                         "requested_search_type",
@@ -1386,6 +1726,11 @@ async def chat_stream(request: ChatRequest):
                 retrieval_error = (deps.search_preferences or {}).get("retrieval_error")
                 if retrieval_error:
                     safe_workflow_metadata["retrieval_error"] = retrieval_error
+                safe_workflow_metadata["answer_review_reviewed"] = review_result.reviewed
+                safe_workflow_metadata["answer_review_action"] = review_result.review_action
+                safe_workflow_metadata["answer_review_risk"] = review_result.unsupported_claim_risk
+                safe_workflow_metadata["answer_review_reason"] = review_result.reason
+                safe_workflow_metadata["answer_review_note_count"] = len(review_result.unsupported_claim_notes or [])
                 if tools_used:
                     tools_data = [
                         {
@@ -1428,6 +1773,21 @@ async def chat_stream(request: ChatRequest):
                         },
                     )
                 await refresh_session_metadata(session_id)
+                _emit_chat_request_metric(
+                    request_id=request_id,
+                    session_id=session_id,
+                    route="/chat/stream",
+                    status="success",
+                    response_backend=response_backend,
+                    requested_search_type=requested_search_type,
+                    effective_search_type=effective_search_type,
+                    use_web_search=bool(deps.use_web_search) if deps is not None else False,
+                    use_react=use_react,
+                    compression_used=compression_used,
+                    tools_used=tools_used,
+                    sources=sources,
+                    response_text=full_response,
+                )
                 yield sse_event("end")
                 logger.info("stream finished normally: session_id=%s run_id=%s", session_id, run_id)
 
@@ -1478,6 +1838,21 @@ async def chat_stream(request: ChatRequest):
                         )
                         await asyncio.shield(refresh_session_metadata(session_id))
                     if cancelled_by_user:
+                        _emit_chat_request_metric(
+                            request_id=request_id,
+                            session_id=session_id,
+                            route="/chat/stream",
+                            status="cancelled",
+                            response_backend=response_backend,
+                            requested_search_type=requested_search_type,
+                            effective_search_type=effective_search_type,
+                            use_web_search=bool(deps.use_web_search) if deps is not None else False,
+                            use_react=use_react,
+                            compression_used=compression_used,
+                            tools_used=tools_used,
+                            sources=sources,
+                            response_text=full_response,
+                        )
                         yield sse_event("cancelled", run_id=run_id, message="已停止生成")
                         yield sse_event("end")
                         return
@@ -1486,6 +1861,21 @@ async def chat_stream(request: ChatRequest):
                 raise
             except Exception as e:
                 logger.exception("Stream error: %s", e)
+                _emit_chat_request_metric(
+                    request_id=request_id,
+                    session_id=session_id,
+                    route="/chat/stream",
+                    status="error",
+                    response_backend=response_backend,
+                    requested_search_type=requested_search_type,
+                    effective_search_type=effective_search_type,
+                    use_web_search=bool(deps.use_web_search) if deps is not None else False,
+                    use_react=use_react,
+                    compression_used=compression_used,
+                    tools_used=tools_used,
+                    sources=sources,
+                    response_text=full_response,
+                )
                 error_type = type(e).__name__
                 error_message = str(e)[:300]
                 yield sse_event(
@@ -1605,6 +1995,27 @@ async def get_session_messages_endpoint(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/sessions/{session_id}/memory", response_model=SessionMemorySnapshot)
+async def get_session_memory_endpoint(session_id: str):
+    try:
+        session = await get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        memory_metadata = await get_session_memory_metadata(session_id)
+        messages = await get_session_messages(session_id)
+        snapshot = build_session_memory_snapshot(
+            session_id=session_id,
+            memory_metadata=memory_metadata,
+            messages=messages,
+        )
+        return SessionMemorySnapshot(**snapshot)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Session memory snapshot failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/sessions/{session_id}")
 async def get_session_info(session_id: str):
     try:
@@ -1680,16 +2091,6 @@ async def get_document_upload_job(job_id: str):
 @app.post("/documents/upload/jobs/{job_id}/cancel")
 async def cancel_document_upload_job(job_id: str):
     return await cancel_upload_ingestion_job(job_id)
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled exception: {exc}")
-    return ErrorResponse(
-        error=str(exc),
-        error_type=type(exc).__name__,
-        request_id=str(uuid.uuid4()),
-    )
-
 
 if __name__ == "__main__":
     uvicorn.run(

@@ -20,6 +20,7 @@ dependencies = [
     "openai>=1.100.2",
     "pydantic-ai>=0.7.6",
     "python-dotenv>=1.1.1",
+    "redis>=5.2.1",
     "pytest>=8.4.1",
     "pytest-asyncio>=0.24.0",
     "pytest-mock>=3.14.0",

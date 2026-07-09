@@ -1,17 +1,13 @@
-# Retrieval Contract Eval
+# Retrieval Quality Eval v2
 
-- 目标：验证检索工具在特定场景下是否履行契约（命中目标并保留关键元数据）。
+- 说明: section_search 与 hybrid_search/artifact_search 是互补关系，不是单向替代。
 
-- total_cases: 1
-- contract_pass_rate: 1.000
-- contract_warn_rate: 0.000
-- contract_fail_rate: 0.000
-- metadata_integrity_rate: 1.000
-- avg_document_hit: 1.000
-- avg_keyword_coverage: 0.000
+- total_cases: 3
 
-## Case Details
+## Mode Summary
 
-| ID | Scenario | Tool | Status | Doc Hit | Sec Hit | Art Hit | Metadata | KW Cov | Failure Reason |
-|---|---|---|---|---:|---:|---:|---:|---:|---|
-| rq_005 | artifact_known_document | artifact | PASS | 1 | 0 | 1 | 1 | 0.000 | None |
+| Mode | Doc@1 | Doc@5 | SecPrec@K | ArtHit@K | KWRecall@K | OrderOK | Latency(ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| artifact | 1.000 | 1.000 | 0.400 | 1.000 | 0.500 | 0.000 | 86.8 |
+| section | 0.000 | 0.000 | 1.000 | 0.000 | 0.556 | 0.667 | 73.4 |
+| hybrid | 0.333 | 1.000 | 0.067 | 1.000 | 0.500 | 0.000 | 810.3 |

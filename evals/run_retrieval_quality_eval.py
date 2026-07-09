@@ -1,4 +1,4 @@
-﻿﻿﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -88,7 +88,9 @@ async def run_suite(cases: List[Dict[str, Any]], limit: int, top_k: int) -> Dict
 def to_markdown(r: Dict[str, Any]) -> str:
     lines=["# Retrieval Quality Eval v2","","- 说明: section_search 与 hybrid_search/artifact_search 是互补关系，不是单向替代。","",f"- total_cases: {r['summary']['total_cases']}","","## Mode Summary","","| Mode | Doc@1 | Doc@5 | SecPrec@K | ArtHit@K | KWRecall@K | OrderOK | Latency(ms) |","|---|---:|---:|---:|---:|---:|---:|---:|"]
     for m,v in r["summary"]["mode_metrics"].items():
-        lines.append(f"| {m} | {(v['Doc Hit@1'] or 0):.3f} | {(v['Doc Hit@5'] or 0):.3f} | {('N/A' if v['Section Precision@K'] is None else f'{v['Section Precision@K']:.3f}')} | {('N/A' if v['Artifact Hit@K'] is None else f'{v['Artifact Hit@K']:.3f}')} | {(v['Keyword Recall@K'] or 0):.3f} | {(v['Order OK'] or 0):.3f} | {(v['Average latency ms'] or 0):.1f} |")
+        section_precision = "N/A" if v["Section Precision@K"] is None else f"{v['Section Precision@K']:.3f}"
+        artifact_hit = "N/A" if v["Artifact Hit@K"] is None else f"{v['Artifact Hit@K']:.3f}"
+        lines.append(f"| {m} | {(v['Doc Hit@1'] or 0):.3f} | {(v['Doc Hit@5'] or 0):.3f} | {section_precision} | {artifact_hit} | {(v['Keyword Recall@K'] or 0):.3f} | {(v['Order OK'] or 0):.3f} | {(v['Average latency ms'] or 0):.1f} |")
     return "\n".join(lines)+"\n"
 
 

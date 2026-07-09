@@ -1,19 +1,30 @@
 import pytest
+import langchain.agents as langchain_agents
+
+if not hasattr(langchain_agents, "create_agent"):
+    langchain_agents.create_agent = lambda *args, **kwargs: None
 
 from agent.agent_langgraph import (
     _build_planner_capabilities,
     _build_runtime_decision_summary,
     _apply_scope_policy_to_hits,
     _summarize_retrieval_results,
+    answer_review_node,
+    build_generation_context_node,
     clean_legacy_warning_text,
+    decide_after_grade_node,
     format_retrieval_results_for_generation,
     _humanize_warning,
     evidence_check_node,
+    execute_retrieval_node,
     finalize_node,
     generate_analysis_node,
+    generate_answer_node,
     initial_intent_planning_node,
     parse_answer_scope,
+    plan_retrieval_node,
     route_after_initial_intent,
+    route_after_plan_retrieval,
     resolve_answer_scope_node,
     _match_target_document,
     _prioritize_sources_by_target,
@@ -25,6 +36,7 @@ from agent.agent_langgraph import (
     parse_retrieval_evaluation,
     rewrite_query_node,
     route_after_grade,
+    route_after_grade_decision,
 )
 from agent.agent_runtime import AgentDependencies
 from agent.models import EvidenceSource
@@ -218,6 +230,39 @@ def test_route_after_max_attempts_goes_generate():
     assert route == "generate_analysis"
 
 
+@pytest.mark.asyncio
+async def test_decide_after_grade_node_records_rewrite_action():
+    out = await decide_after_grade_node(
+        {
+            "retrieval_sufficient": False,
+            "retrieval_attempt_count": 1,
+            "max_retrieval_attempts": 2,
+            "skip_rewrite": False,
+            "metadata": {},
+        }
+    )
+    assert out["post_grade_action"] == "rewrite_query"
+    assert out["metadata"]["post_grade_action"] == "rewrite_query"
+    assert out["metadata"]["post_grade_reason"] == "retry_with_rewrite"
+    assert route_after_grade_decision(out) == "rewrite_query"
+
+
+@pytest.mark.asyncio
+async def test_decide_after_grade_node_records_generate_action_when_sufficient():
+    out = await decide_after_grade_node(
+        {
+            "retrieval_sufficient": True,
+            "retrieval_attempt_count": 1,
+            "max_retrieval_attempts": 2,
+            "skip_rewrite": False,
+            "metadata": {},
+        }
+    )
+    assert out["post_grade_action"] == "generate_analysis"
+    assert out["metadata"]["post_grade_reason"] == "retrieval_sufficient"
+    assert route_after_grade_decision(out) == "generate_analysis"
+
+
 def test_parse_retrieval_evaluation_normal_json():
     raw = """{"answerable": true, "confidence": 0.9, "needs_retry": false, "reason": "ok", "missing_aspects": ["x"], "suggested_query": "q", "supporting_hit_indices": [1,2]}"""
     parsed = parse_retrieval_evaluation(raw)
@@ -263,6 +308,26 @@ async def test_rewrite_uses_suggested_query_first():
 
 
 @pytest.mark.asyncio
+async def test_rewrite_preserves_protected_rrt_terms_from_suggested_query():
+    state = {
+        "question": "HMA-RRT 这篇 USV 论文做过哪些消融实验？",
+        "current_query": "HMA-RRT 这篇 USV 论文做过哪些消融实验？",
+        "retrieval_insufficient_reason": "insufficient",
+        "documents": [],
+        "retrieval_results": [],
+        "rewritten_queries": [],
+        "suggested_rewrite_query": "HMA-RTT USV 消融实验 采样模块",
+        "tools_used": [],
+    }
+
+    out = await rewrite_query_node(state)
+
+    assert out["current_query"].startswith("HMA-RRT ")
+    assert "HMA-RTT" in out["current_query"]
+    assert out["rewritten_queries"] == [out["current_query"]]
+
+
+@pytest.mark.asyncio
 async def test_grade_fallbacks_to_rule_when_evaluator_fails(monkeypatch):
     async def fake_eval(_state):
         return None
@@ -277,6 +342,37 @@ async def test_grade_fallbacks_to_rule_when_evaluator_fails(monkeypatch):
     out = await grade_retrieval_node(state)
     assert out["retrieval_sufficient"] is True
     assert out["metadata"]["retrieval_evaluator_used"] is False
+
+
+@pytest.mark.asyncio
+async def test_grade_keeps_rule_sufficient_when_evaluator_requests_retry(monkeypatch):
+    async def fake_eval(_state):
+        return {
+            "answerable": False,
+            "confidence": 0.4,
+            "needs_retry": True,
+            "reason": "partial but usable evidence",
+            "missing_aspects": ["extra detail"],
+            "suggested_query": "narrow retry query",
+            "supporting_hit_indices": [1],
+        }
+
+    monkeypatch.setattr("agent.agent_langgraph.evaluate_retrieval_with_llm", fake_eval)
+    state = {
+        "retrieval_results": [
+            {"score": 0.8, "content": "Hybrid-RRT method evidence"},
+            {"score": 0.7, "content": "sampling strategy evidence"},
+        ],
+        "retrieval_attempt_count": 1,
+        "retrieval_attempts": [{"attempt": 1, "query": "q", "result_count": 2, "top_score": 0.8}],
+        "metadata": {},
+    }
+
+    out = await grade_retrieval_node(state)
+
+    assert out["retrieval_sufficient"] is True
+    assert out["retrieval_insufficient_reason"] is None
+    assert out["metadata"]["retrieval_retry_trigger"] == "none"
 
 
 def test_match_target_document_by_filename():
@@ -569,6 +665,7 @@ async def test_initial_intent_planning_direct_answer_sets_skip_metadata(monkeypa
     assert out["metadata"]["retrieval_skipped_by_planner"] is True
     assert out["metadata"]["direct_answer_allowed"] is True
     assert route_after_initial_intent(out) == "generate_analysis"
+    assert out["metadata"]["initial_intent_planner_used"] is True
 
 
 def test_route_after_initial_intent_local_retrieval_path():
@@ -709,6 +806,166 @@ async def test_local_retrieval_rebuilds_missing_steps_for_evidence_question(monk
     assert out["metadata"]["planner_fallback_used"] is True
     assert out["metadata"]["fallback_decision"] == "local_retrieval_fallback"
     assert out["metadata"]["intent"] == "local_paper_qa"
+    assert out["metadata"]["tools_executed"] == ["hybrid_search"]
+    assert len(out["retrieval_results"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_local_retrieval_reuses_initial_intent_plan_without_replanning(monkeypatch):
+    async def fail_plan_user_intent_debug(**_kwargs):
+        raise AssertionError("planner should not be called on first retrieval round when intent_plan already exists")
+
+    async def fake_execute_intent_plan_steps(**_kwargs):
+        return {
+            "results": [{"chunk_id": "c1", "document_id": "d1", "content": "x", "score": 0.7, "metadata": {}, "document_title": "Doc", "document_source": "s"}],
+            "tools_executed": [{"tool": "hybrid_search", "args": {"query": "q", "limit": 5}}],
+            "planned_steps": [{"tool": "hybrid_search", "query": "q", "limit": 5}],
+            "warnings": [],
+            "filtered_unavailable_tools": [],
+        }
+
+    monkeypatch.setattr("agent.agent_langgraph.plan_user_intent_debug", fail_plan_user_intent_debug)
+    monkeypatch.setattr("agent.agent_langgraph.execute_intent_plan_steps", fake_execute_intent_plan_steps)
+    monkeypatch.setattr("agent.agent_langgraph.build_langchain_tools", lambda _deps: [])
+
+    state = {
+        "deps": AgentDependencies(session_id="s-reuse"),
+        "question": "根据上传论文总结方法贡献",
+        "context_prompt": "",
+        "retrieval_attempt_count": 0,
+        "retrieval_results": [],
+        "retrieval_attempts": [],
+        "metadata": {"planner_used": True, "intent_planner_used": True},
+        "intent_plan": {
+            "intent": "local_paper_qa",
+            "needs_retrieval": True,
+            "retrieval_steps": [{"tool": "hybrid_search", "query": "q", "limit": 5}],
+            "max_tools": 1,
+            "allow_external_sources": False,
+            "evidence_policy": "answer_with_available_evidence_and_state_uncertainty",
+            "direct_answer_allowed": False,
+            "rewrite_allowed": True,
+            "reason": "Need evidence.",
+            "warnings": [],
+        },
+        "target_documents": [],
+        "scope_policy": "broad_kb",
+        "allow_supplemental": True,
+        "tools_used": [],
+    }
+    out = await local_retrieval_node(state)
+    assert out["metadata"]["planner_reused_from_initial_intent"] is True
+    assert out["metadata"]["retry_plan_used"] is False
+    assert out["metadata"]["tools_executed"] == ["hybrid_search"]
+    assert len(out["retrieval_results"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_plan_retrieval_node_sets_execution_flag_without_running_tools(monkeypatch):
+    async def fake_plan_user_intent_debug(**_kwargs):
+        return {
+            "normalized_plan": {
+                "intent": "local_paper_qa",
+                "needs_retrieval": True,
+                "retrieval_steps": [{"tool": "hybrid_search", "query": "q", "limit": 5}],
+                "max_tools": 1,
+                "allow_external_sources": False,
+                "direct_answer_allowed": False,
+                "rewrite_allowed": True,
+                "evidence_policy": "answer_with_available_evidence_and_state_uncertainty",
+                "reason": "Need evidence.",
+                "warnings": [],
+            },
+            "fallback_used": False,
+            "fallback_reason": "",
+            "fallback_decision": "",
+            "raw_model_content_preview": "",
+        }
+
+    async def fail_execute_intent_plan_steps(**_kwargs):
+        raise AssertionError("plan_retrieval_node should not execute tools")
+
+    monkeypatch.setattr("agent.agent_langgraph.plan_user_intent_debug", fake_plan_user_intent_debug)
+    monkeypatch.setattr("agent.agent_langgraph.execute_intent_plan_steps", fail_execute_intent_plan_steps)
+    monkeypatch.setattr("agent.agent_langgraph.get_langchain_chat_model", lambda: object())
+    monkeypatch.setattr("agent.agent_langgraph.build_langchain_tools", lambda _deps: [])
+
+    state = {
+        "deps": AgentDependencies(session_id="s-plan-only"),
+        "question": "请根据文档总结方法",
+        "context_prompt": "",
+        "retrieval_attempt_count": 0,
+        "retrieval_results": [],
+        "retrieval_attempts": [],
+        "metadata": {},
+        "target_documents": [],
+        "scope_policy": "broad_kb",
+        "allow_supplemental": True,
+        "tools_used": [],
+    }
+    out = await plan_retrieval_node(state)
+    assert out["retrieval_execution_required"] is True
+    assert route_after_plan_retrieval(out) == "execute_retrieval"
+    assert out["metadata"]["retrieval_skipped_by_planner"] is False
+    assert out["retrieval_attempt_count"] == 1
+    assert out["retrieval_results"] == []
+
+
+@pytest.mark.asyncio
+async def test_execute_retrieval_node_uses_preplanned_state_without_replanning(monkeypatch):
+    async def fail_plan_user_intent_debug(**_kwargs):
+        raise AssertionError("execute_retrieval_node should reuse the preplanned intent plan")
+
+    async def fake_execute_intent_plan_steps(**_kwargs):
+        return {
+            "results": [{"chunk_id": "c1", "document_id": "d1", "content": "x", "score": 0.7, "metadata": {}, "document_title": "Doc", "document_source": "s"}],
+            "tools_executed": [{"tool": "hybrid_search", "args": {"query": "q", "limit": 5}}],
+            "planned_steps": [{"tool": "hybrid_search", "query": "q", "limit": 5}],
+            "warnings": [],
+            "filtered_unavailable_tools": [],
+        }
+
+    monkeypatch.setattr("agent.agent_langgraph.plan_user_intent_debug", fail_plan_user_intent_debug)
+    monkeypatch.setattr("agent.agent_langgraph.execute_intent_plan_steps", fake_execute_intent_plan_steps)
+    monkeypatch.setattr("agent.agent_langgraph.build_langchain_tools", lambda _deps: [])
+
+    state = {
+        "deps": AgentDependencies(session_id="s-execute-only"),
+        "question": "请根据文档总结方法",
+        "context_prompt": "",
+        "retrieval_attempt_count": 1,
+        "current_query": "q",
+        "retrieval_results": [],
+        "retrieval_attempts": [],
+        "retrieval_execution_required": True,
+        "metadata": {
+            "planner_used": True,
+            "intent_planner_used": True,
+            "retry_plan_used": True,
+            "planner_reused_from_initial_intent": False,
+        },
+        "intent_plan": {
+            "intent": "local_paper_qa",
+            "needs_retrieval": True,
+            "retrieval_steps": [{"tool": "hybrid_search", "query": "q", "limit": 5}],
+            "max_tools": 1,
+            "allow_external_sources": False,
+            "evidence_policy": "answer_with_available_evidence_and_state_uncertainty",
+            "direct_answer_allowed": False,
+            "rewrite_allowed": True,
+            "reason": "Need evidence.",
+            "warnings": [],
+        },
+        "target_documents": [],
+        "scope_policy": "broad_kb",
+        "allow_supplemental": True,
+        "tools_used": [],
+    }
+    out = await execute_retrieval_node(state)
+    assert out["retrieval_execution_required"] is False
+    assert out["retrieval_attempt_count"] == 1
+    assert out["metadata"]["retry_plan_used"] is True
+    assert out["metadata"]["planner_reused_from_initial_intent"] is False
     assert out["metadata"]["tools_executed"] == ["hybrid_search"]
     assert len(out["retrieval_results"]) == 1
 
@@ -896,6 +1153,75 @@ async def test_evidence_warning_and_finalize_note_for_empty_retrieval():
     assert "以下内容" not in finalized["final_answer"]
 
 
+@pytest.mark.asyncio
+async def test_answer_review_node_appends_runtime_caveat_for_unsupported_claim():
+    out = await answer_review_node(
+        {
+            "draft_answer": "实验表明该方法在 2024 年数据集上提升了 17.3% 的成功率。",
+            "sources": [
+                {
+                    "document_title": "Hybrid-RRT",
+                    "snippet": (
+                        "Hybrid-RRT improves convergence and balances exploration and exploitation. "
+                        "The abstract reports 40.83% improvement compared with Informed RRT*."
+                    ),
+                    "metadata": {
+                        "section_title": "Abstract",
+                        "section_path_text": "Hybrid-RRT > Abstract",
+                        "source_type": "local",
+                    },
+                }
+            ],
+            "retrieval_results": [
+                {
+                    "document_id": "d1",
+                    "document_title": "Hybrid-RRT",
+                    "content": "The abstract reports 40.83% improvement compared with Informed RRT*.",
+                    "score": 0.8,
+                    "metadata": {"source_type": "local"},
+                }
+            ],
+            "metadata": {"intent": "local_paper_qa"},
+        }
+    )
+    assert out["metadata"]["answer_review_reviewed"] is True
+    assert out["metadata"]["answer_review_action"] == "append_caveat"
+    assert out["metadata"]["answer_review_risk"] >= 1
+    assert "原文" in out["draft_answer"]
+
+
+@pytest.mark.asyncio
+async def test_answer_review_node_records_citation_review_metadata():
+    out = await answer_review_node(
+        {
+            "draft_answer": "该方法提升了 40.83% [9]。实验结果表明它优于 baseline。",
+            "sources": [
+                {
+                    "document_title": "Hybrid-RRT",
+                    "snippet": "The method improves success rate by 40.83%.",
+                    "metadata": {"source_type": "local"},
+                }
+            ],
+            "retrieval_results": [
+                {
+                    "document_id": "d1",
+                    "chunk_id": "c1",
+                    "document_title": "Hybrid-RRT",
+                    "content": "The method improves success rate by 40.83%.",
+                    "score": 0.88,
+                    "metadata": {"source_type": "local"},
+                }
+            ],
+            "metadata": {"intent": "local_paper_qa"},
+        }
+    )
+
+    assert out["metadata"]["citation_review_reviewed"] is True
+    assert out["metadata"]["citation_review_risk"] == 2
+    assert out["metadata"]["citation_invalid_ref_ids"] == [9]
+    assert out["metadata"]["evidence_reference_count"] == 1
+
+
 def test_humanize_warning_uses_position_independent_wording():
     text = _humanize_warning("No retrieval evidence found; answer should be treated as general guidance.")
     assert text is not None
@@ -966,6 +1292,70 @@ async def test_generate_analysis_prompt_includes_runtime_decision_summary(monkey
     assert out["draft_answer"] == "ok"
     assert "运行决策摘要" in captured["prompt"]
     assert "planner 主动跳过检索并允许 direct answer" in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_build_generation_context_node_sets_prompt_without_model_call(monkeypatch):
+    class FailModel:
+        async def ainvoke(self, _messages):
+            raise AssertionError("build_generation_context_node should not invoke the model")
+
+    monkeypatch.setattr("agent.agent_langgraph.get_langchain_chat_model", lambda: FailModel())
+    state = {
+        "question": "请简要介绍系统能力",
+        "context_prompt": "这是历史上下文",
+        "documents": [],
+        "retrieval_results": [],
+        "warnings": [],
+        "retrieval_attempts": [],
+        "rewritten_queries": [],
+        "retrieval_evaluation": {},
+        "answer_scope": {},
+        "scope_policy": "broad_kb",
+        "metadata": {
+            "planner_decision": {
+                "intent": "direct_answer",
+                "needs_retrieval": False,
+                "direct_answer_allowed": True,
+                "planned_tools": [],
+                "reason": "No evidence required.",
+                "evidence_policy": "answer_with_available_evidence_and_state_uncertainty",
+            },
+            "retrieval_skipped_by_planner": True,
+            "direct_answer_allowed": True,
+            "retrieval_sufficient": True,
+            "retrieval_insufficient_reason": None,
+            "tools_executed": [],
+        },
+    }
+    out = await build_generation_context_node(state)
+    assert out["metadata"]["generation_context_built"] is True
+    assert "generation_prompt" in out
+    assert "运行决策摘要" in out["generation_prompt"]
+    assert "会话上下文" in out["generation_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_generate_answer_node_uses_prebuilt_generation_payload(monkeypatch):
+    captured = {"messages": None}
+
+    class DummyModel:
+        async def ainvoke(self, messages):
+            captured["messages"] = messages
+            return type("Resp", (), {"content": "ok"})()
+
+    monkeypatch.setattr("agent.agent_langgraph.get_langchain_chat_model", lambda: DummyModel())
+    state = {
+        "generation_prompt": "PROMPT_BODY",
+        "generation_system_text": "SYSTEM_BODY",
+        "retrieval_results": [],
+        "metadata": {"generation_context_built": True},
+    }
+    out = await generate_answer_node(state)
+    assert out["draft_answer"] == "ok"
+    assert out["metadata"]["generation_answer_built"] is True
+    assert captured["messages"][0]["content"] == "SYSTEM_BODY"
+    assert captured["messages"][1]["content"] == "PROMPT_BODY"
 
 
 @pytest.mark.asyncio

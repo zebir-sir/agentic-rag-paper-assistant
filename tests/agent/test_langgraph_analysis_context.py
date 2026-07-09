@@ -1,6 +1,10 @@
 from types import SimpleNamespace
 
 import pytest
+import langchain.agents as langchain_agents
+
+if not hasattr(langchain_agents, "create_agent"):
+    langchain_agents.create_agent = lambda *args, **kwargs: None
 
 from agent.agent_langgraph import run_langgraph_analysis
 from agent.agent_runtime import AgentDependencies
@@ -39,3 +43,47 @@ async def test_run_langgraph_analysis_accepts_context_prompt(monkeypatch):
     assert result.raw_state["question"] == "当前问题"
     assert "metadata" in result.raw_state
     assert isinstance(result.raw_state["metadata"], dict)
+
+
+@pytest.mark.asyncio
+async def test_run_langgraph_analysis_direct_answer_skips_document_inspection(monkeypatch):
+    async def fake_plan_user_intent_debug(**_kwargs):
+        return {
+            "normalized_plan": {
+                "intent": "direct_answer",
+                "needs_retrieval": False,
+                "retrieval_steps": [],
+                "max_tools": 0,
+                "allow_external_sources": False,
+                "evidence_policy": "answer_with_available_evidence_and_state_uncertainty",
+                "direct_answer_allowed": True,
+                "rewrite_allowed": True,
+                "reason": "no retrieval needed",
+                "warnings": [],
+            },
+            "fallback_used": False,
+            "fallback_reason": "",
+            "fallback_decision": "",
+            "raw_model_content_preview": "",
+        }
+
+    async def fail_list_documents(_payload):
+        raise AssertionError("inspect_documents should be skipped for direct answer path")
+
+    class DummyModel:
+        async def ainvoke(self, _messages):
+            return SimpleNamespace(content="直接回答即可。")
+
+    monkeypatch.setattr("agent.agent_langgraph.plan_user_intent_debug", fake_plan_user_intent_debug)
+    monkeypatch.setattr("agent.agent_langgraph.get_langchain_chat_model", lambda: DummyModel())
+    monkeypatch.setattr("agent.agent_langgraph.list_documents_tool", fail_list_documents)
+
+    deps = AgentDependencies(session_id="s2", user_id="u2")
+    result = await run_langgraph_analysis(
+        question="简单介绍一下你的能力",
+        deps=deps,
+        context_prompt="",
+    )
+
+    assert result.message
+    assert result.metadata["retrieval_skipped_by_planner"] is True

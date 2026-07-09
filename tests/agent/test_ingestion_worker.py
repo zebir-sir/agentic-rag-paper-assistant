@@ -148,14 +148,71 @@ def test_build_dlq_message_does_not_include_pdf_content_chunk_or_embedding():
 
 
 @pytest.mark.asyncio
-async def test_process_queue_message_and_ack_always_acks():
+async def test_process_queue_message_and_ack_acks_on_success():
     class DummyMessage:
         def __init__(self):
             self.body = b'{"task_id":"task-a","file_path":"documents/ui_uploads/a/paper.pdf","document_id":null}'
             self.ack = AsyncMock()
+            self.nack = AsyncMock()
 
     msg = DummyMessage()
     with patch("agent.ingestion_worker.process_rabbitmq_message", new_callable=AsyncMock) as mock_process:
         mock_process.return_value = {"action": "done"}
         await process_queue_message_and_ack(msg)
         msg.ack.assert_awaited_once()
+        msg.nack.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_queue_message_and_ack_nacks_when_processing_fails():
+    class DummyMessage:
+        def __init__(self):
+            self.body = b'{"task_id":"task-b","file_path":"documents/ui_uploads/a/paper.pdf","document_id":null}'
+            self.ack = AsyncMock()
+            self.nack = AsyncMock()
+
+    msg = DummyMessage()
+    with patch("agent.ingestion_worker.process_rabbitmq_message", new_callable=AsyncMock) as mock_process:
+        mock_process.side_effect = RuntimeError("publish retry failed")
+        await process_queue_message_and_ack(msg)
+        msg.ack.assert_not_awaited()
+        msg.nack.assert_awaited_once_with(requeue=True)
+
+
+@pytest.mark.asyncio
+async def test_process_queue_message_and_ack_dlqs_invalid_message_before_ack():
+    class DummyMessage:
+        def __init__(self):
+            self.body = b'{"file_path":"documents/ui_uploads/a/paper.pdf"}'
+            self.ack = AsyncMock()
+            self.nack = AsyncMock()
+
+    msg = DummyMessage()
+    with patch("agent.ingestion_worker.process_rabbitmq_message", new_callable=AsyncMock) as mock_process:
+        with patch("agent.ingestion_worker.publish_ingestion_dlq_message", new_callable=AsyncMock) as mock_dlq:
+            mock_process.side_effect = ValueError("Missing required field: task_id")
+            await process_queue_message_and_ack(msg)
+            payload = mock_dlq.await_args.args[0]
+            assert payload["status"] == "invalid_message"
+            assert payload["error_message"] == "Missing required field: task_id"
+            assert '"file_path"' in payload["raw_message"]
+            msg.ack.assert_awaited_once()
+            msg.nack.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_queue_message_and_ack_nacks_when_invalid_message_dlq_publish_fails():
+    class DummyMessage:
+        def __init__(self):
+            self.body = b'{"file_path":"documents/ui_uploads/a/paper.pdf"}'
+            self.ack = AsyncMock()
+            self.nack = AsyncMock()
+
+    msg = DummyMessage()
+    with patch("agent.ingestion_worker.process_rabbitmq_message", new_callable=AsyncMock) as mock_process:
+        with patch("agent.ingestion_worker.publish_ingestion_dlq_message", new_callable=AsyncMock) as mock_dlq:
+            mock_process.side_effect = ValueError("Missing required field: task_id")
+            mock_dlq.side_effect = RuntimeError("dlq unavailable")
+            await process_queue_message_and_ack(msg)
+            msg.ack.assert_not_awaited()
+            msg.nack.assert_awaited_once_with(requeue=True)

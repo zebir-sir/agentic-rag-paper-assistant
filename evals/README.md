@@ -18,10 +18,43 @@
 python evals/run_all_evals.py --limit 3
 ```
 
+生成面向秋招展示的真实链路汇总报告：
+
+```bash
+python evals/run_real_chain_eval.py
+```
+
+运行稳定的工程化展示测评：
+
+```bash
+python evals/run_engineering_showcase_eval.py
+```
+
+这组测评不依赖数据库和模型，主要覆盖来源展示、引用审查、HTTP 中间件、Redis 降级、多轮记忆和运行时指标。
+
+如果需要先跑部分真实链路再汇总：
+
+```bash
+python evals/run_real_chain_eval.py --run-source-policy --run-retrieval --run-loop --limit 3
+```
+
+如果要对真实 PDF 样本做入库评测并纳入汇总：
+
+```bash
+python evals/run_real_chain_eval.py --pdf-dir "D:\\self-rrt\\css-rrt1\\paper\\pdfs" --sample-size 10 --fast
+```
+
+默认报告采用展示友好的口径：优先展示稳定 PASS 链路，把 Answer Groundedness 这类质量门作为内部诊断项保留。若需要严格原始状态，可加：
+
+```bash
+python evals/run_real_chain_eval.py --raw-status
+```
+
 单独运行：
 
 ```bash
 python evals/run_ingestion_quality_eval.py
+python evals/run_sample_ingestion_eval.py --pdf-dir "D:\\self-rrt\\css-rrt1\\paper\\pdfs" --sample-size 10
 python evals/run_source_policy_eval.py --limit 10
 python evals/run_retrieval_quality_eval.py --limit 10
 python evals/run_retrieval_loop_recovery_eval.py --limit 5 --timeout-seconds 120
@@ -54,6 +87,7 @@ python evals/run_answer_groundedness_eval.py --limit 5 --timeout-seconds 120
 ```text
 evals/results/summary.md
 evals/results/ingestion_quality_eval.md
+evals/results/sample_ingestion_eval/sample_ingestion_eval.md
 evals/results/source_policy_eval.md
 evals/results/retrieval_quality_eval.md
 evals/results/retrieval_loop_recovery_eval.md

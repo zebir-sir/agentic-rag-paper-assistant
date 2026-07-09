@@ -14,7 +14,7 @@ from warnings import filterwarnings
 
 from agent.db_utils import close_database, db_pool, execute_init_sql, initialize_database
 from agent.models import IngestionConfig, IngestionResult
-from agent.providers import get_embedding_model
+from agent.providers import build_embedding_request_kwargs, get_embedding_model
 from .chunker import ChunkingConfig, DocumentChunk, create_chunker
 from .extract_files import PDFExtractionConfig, create_pdf_extractor
 
@@ -250,10 +250,11 @@ class DocumentIngestionPipeline:
         for start in range(0, len(texts), batch_size):
             batch_texts = texts[start:start + batch_size]
             resp = await client.embeddings.create(
-                model=model,
-                input=batch_texts,
-                dimensions=1024,
-                encoding_format="float",
+                **build_embedding_request_kwargs(
+                    model=model,
+                    input_value=batch_texts,
+                    encoding_format="float",
+                )
             )
             vectors = [item.embedding for item in resp.data]
 

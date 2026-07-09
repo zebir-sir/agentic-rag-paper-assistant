@@ -69,6 +69,25 @@ def build_ingestion_dlq_message(
     }
 
 
+def build_ingestion_invalid_message(
+    error_message: str,
+    failed_at: str,
+    raw_message: str,
+    task_id: Optional[str] = None,
+    document_id: Optional[str] = None,
+    file_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "task_id": task_id,
+        "document_id": document_id,
+        "file_path": file_path,
+        "status": "invalid_message",
+        "error_message": error_message,
+        "failed_at": failed_at,
+        "raw_message": raw_message,
+    }
+
+
 async def publish_ingestion_dlq_message(payload: Dict[str, Any]) -> None:
     rabbitmq_url = get_rabbitmq_url()
     if not rabbitmq_url:

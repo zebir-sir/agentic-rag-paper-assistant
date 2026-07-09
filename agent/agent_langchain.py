@@ -3,8 +3,12 @@ import logging
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List
 
-from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
+
+try:
+    from langchain.agents import create_agent as _create_agent
+except ImportError:  # pragma: no cover - depends on installed LangChain major version.
+    _create_agent = None
 
 from .agent_runtime import AgentDependencies
 from .langchain_tools import build_langchain_tools
@@ -62,9 +66,14 @@ def get_langchain_chat_model() -> ChatOpenAI:
 
 
 def build_langchain_agent(deps: AgentDependencies):
+    if _create_agent is None:
+        raise RuntimeError(
+            "Current LangChain version does not expose create_agent; "
+            "use the LangGraph runtime or install a compatible LangChain version."
+        )
     model = get_langchain_chat_model()
     tools = build_langchain_tools(deps)
-    return create_agent(
+    return _create_agent(
         model=model,
         tools=tools,
         system_prompt=SYSTEM_PROMPT,

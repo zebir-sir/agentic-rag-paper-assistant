@@ -10,6 +10,7 @@ from .ingestion_jobs import ingest_saved_pdf_file
 from .ingestion_tasks_db import get_ingestion_task, update_ingestion_task_status
 from .rabbitmq_producer import (
     build_ingestion_dlq_message,
+    build_ingestion_invalid_message,
     publish_ingestion_dlq_message,
     publish_ingestion_task,
 )
@@ -26,6 +27,27 @@ def _short_error(exc: Exception, max_len: int = 500) -> str:
     if len(text) <= max_len:
         return text
     return text[:max_len]
+
+
+def _decode_raw_message(body: bytes, max_len: int = 2000) -> str:
+    text = body.decode("utf-8", errors="replace")
+    if len(text) <= max_len:
+        return text
+    return text[:max_len]
+
+
+async def _nack_message(message: Any, requeue: bool = True) -> None:
+    nack = getattr(message, "nack", None)
+    if callable(nack):
+        await nack(requeue=requeue)
+        return
+
+    reject = getattr(message, "reject", None)
+    if callable(reject):
+        await reject(requeue=requeue)
+        return
+
+    raise RuntimeError("Queue message does not support nack/reject")
 
 
 def parse_ingestion_message(body: bytes) -> Dict[str, Any]:
@@ -167,10 +189,26 @@ async def process_rabbitmq_message(body: bytes) -> Dict[str, Any]:
 async def process_queue_message_and_ack(message: Any) -> None:
     try:
         await process_rabbitmq_message(message.body)
+        await message.ack()
+        return
+    except ValueError as exc:
+        logger.warning("Invalid ingestion message, publishing to DLQ: %s", exc)
+        dlq_payload = build_ingestion_invalid_message(
+            error_message=str(exc),
+            failed_at=_now_utc().isoformat(),
+            raw_message=_decode_raw_message(message.body),
+        )
+        try:
+            await publish_ingestion_dlq_message(dlq_payload)
+        except Exception as publish_exc:
+            logger.exception("Failed to publish invalid ingestion message to DLQ: %s", publish_exc)
+            await _nack_message(message, requeue=True)
+            return
+        await message.ack()
+        return
     except Exception as exc:
         logger.exception("Failed to process ingestion message: %s", exc)
-    finally:
-        await message.ack()
+        await _nack_message(message, requeue=True)
 
 
 async def consume_ingestion_tasks() -> None:

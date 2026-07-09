@@ -41,6 +41,12 @@ Agentic RAG Paper Assistant 使用轻量项目级评测体系验证 Agentic RAG 
 python evals/run_ingestion_quality_eval.py
 ```
 
+如果希望对一批外部 PDF 做一次独立的样本入库评测，而不是混入现有知识库全量指标，可以运行：
+
+```bash
+python evals/run_sample_ingestion_eval.py --pdf-dir "D:\\self-rrt\\css-rrt1\\paper\\pdfs" --sample-size 10
+```
+
 ### 2.2 Source Policy Eval
 
 **目标**  

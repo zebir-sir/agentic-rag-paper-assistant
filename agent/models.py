@@ -115,6 +115,36 @@ class SessionMessagesResponse(BaseModel):
     total: int = 0
 
 
+class SessionMemoryPreviewItem(BaseModel):
+    role: str
+    content: str
+
+
+class SessionMemorySections(BaseModel):
+    current_topic: str = ""
+    user_constraints: str = ""
+    confirmed_facts: str = ""
+    user_focus: str = ""
+    pending_questions: str = ""
+    unknowns: str = ""
+
+
+class SessionMemorySnapshot(BaseModel):
+    session_id: str
+    latest_summary: str = ""
+    compression_count: int = 0
+    compacted_message_count: int = 0
+    summary_updated_at: Optional[str] = None
+    history_message_count: int = 0
+    sanitized_history_count: int = 0
+    recent_message_count: int = 0
+    using_summary_context: bool = False
+    full_history_estimated_tokens: int = 0
+    summary_context_estimated_tokens: int = 0
+    summary_sections: SessionMemorySections = Field(default_factory=SessionMemorySections)
+    recent_messages_preview: List[SessionMemoryPreviewItem] = Field(default_factory=list)
+
+
 class IngestionTaskResponse(BaseModel):
     task_id: str
     document_id: Optional[str] = None
@@ -163,3 +193,16 @@ class HealthStatus(BaseModel):
     llm_connection: bool
     version: str
     timestamp: datetime
+
+
+class ComponentStatus(BaseModel):
+    enabled: bool
+    healthy: bool
+    detail: str
+
+
+class ReadinessStatus(BaseModel):
+    status: Literal["ready", "degraded", "not_ready"]
+    version: str
+    timestamp: datetime
+    components: Dict[str, ComponentStatus] = Field(default_factory=dict)

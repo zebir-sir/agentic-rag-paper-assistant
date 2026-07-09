@@ -12,6 +12,7 @@
 5. worker 更新任务状态：
    - `queued -> processing -> done`
    - 或失败时 `queued -> processing -> queued(retry) -> failed`
+   - 非法消息会进入 DLQ，避免被直接确认后丢失
 
 ## 接口
 - `POST /ingestion/tasks`
@@ -43,6 +44,7 @@ docker compose up -d postgres rabbitmq api ingestion-worker ui
    - 或失败链路：`queued -> processing -> queued/retry -> failed`
 4. 在 RabbitMQ 管理台查看队列：
    - [http://localhost:15672](http://localhost:15672)
+   - 可同时检查主队列和 DLQ 是否有预期消息流转
 5. 数据库验证：
    - `ingestion_tasks` 状态与 `retry_count`、`error_message` 正确
    - `documents` 有新增文档
@@ -50,5 +52,6 @@ docker compose up -d postgres rabbitmq api ingestion-worker ui
 
 ## 当前限制
 - 已实现基础幂等保护。
+- 当前重试仍为立即重投主队列，尚未加入延迟退避。
 - 跨系统事务级幂等暂未彻底解决（例如“写入成功但状态更新前崩溃”场景）。
 - `document_id` 回填仍可能依赖现有入库链路返回方式（当前实现可能走日志提取）。

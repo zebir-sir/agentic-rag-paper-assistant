@@ -1,6 +1,6 @@
 import os
 import asyncio
-from typing import Optional
+from typing import Any, Dict, Optional
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.models.openai import OpenAIChatModel
 import openai
@@ -33,6 +33,37 @@ def get_embedding_client() -> openai.AsyncOpenAI:
 
 def get_embedding_model() -> str:
     return os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+
+
+def get_embedding_dimensions(model_choice: Optional[str] = None) -> Optional[int]:
+    raw = str(os.getenv("EMBEDDING_DIMENSIONS", "") or "").strip()
+    if raw:
+        value = int(raw)
+        return value if value > 0 else None
+
+    model_name = str(model_choice or get_embedding_model() or "").strip()
+    if model_name.startswith("text-embedding-3"):
+        return 1024
+    if model_name.startswith("Qwen/Qwen3-Embedding-"):
+        return 1024
+    return None
+
+
+def build_embedding_request_kwargs(
+    *,
+    model: str,
+    input_value: Any,
+    encoding_format: str = "float",
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "model": model,
+        "input": input_value,
+        "encoding_format": encoding_format,
+    }
+    dimensions = get_embedding_dimensions(model)
+    if dimensions is not None:
+        payload["dimensions"] = dimensions
+    return payload
 
 
 async def test_llm_connection() -> tuple[bool, str | None]:

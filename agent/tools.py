@@ -21,7 +21,7 @@ from .db_utils import (
     get_document_chunks,
 )
 from .models import ChunkResult, DocumentMetadata
-from .providers import get_embedding_client, get_embedding_model
+from .providers import build_embedding_request_kwargs, get_embedding_client, get_embedding_model
 from .cache_utils import cache_get_json, cache_set_json, make_cache_key
 
 load_dotenv()
@@ -54,10 +54,11 @@ async def generate_embedding(text: str) -> List[float]:
     try:
         response = await asyncio.wait_for(
             embedding_client.embeddings.create(
-                model=EMBEDDING_MODEL,
-                input=text,
-                dimensions=1024,
-                encoding_format="float",
+                **build_embedding_request_kwargs(
+                    model=EMBEDDING_MODEL,
+                    input_value=text,
+                    encoding_format="float",
+                )
             ),
             timeout=EMBEDDING_TIMEOUT_SECONDS,
         )

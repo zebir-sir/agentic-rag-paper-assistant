@@ -310,7 +310,7 @@ async def run_suite(
             full_sources_eval = _evaluate_items(full["sources"], expected_docs, expected_keywords, top_k)
             preserved_cues = _preserved_cues(original_target_cues, full["rewritten_queries"])
             cue_preservation_ratio = _cue_preservation_ratio(original_target_cues, preserved_cues)
-            full_doc_hit = int(full_hits_eval["doc_hit"])
+            full_doc_hit = max(int(full_hits_eval["doc_hit"]), int(full_sources_eval["doc_hit"]))
             final_doc_hit_count += full_doc_hit
 
             rewrite_triggered = 1 if full["rewrite_used"] else 0

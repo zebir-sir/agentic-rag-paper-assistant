@@ -47,8 +47,16 @@ documents/
 *.pdf
 
 # Eval raw outputs
-evals/results/*.json
-evals/results/answer_groundedness_eval.md
+evals/results/**
+!evals/results/
+!evals/results/.gitkeep
+!evals/results/summary.md
+!evals/results/ingestion_quality_eval.md
+!evals/results/source_policy_eval.md
+!evals/results/retrieval_quality_eval.md
+!evals/results/retrieval_loop_recovery_eval.md
+!evals/results/real_chain_eval.md
+!evals/results/engineering_showcase_eval.md
 
 # Local logs / cache
 test_logs/

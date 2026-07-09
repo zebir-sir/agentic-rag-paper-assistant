@@ -18,6 +18,10 @@ from agent.models import (
     IngestionResult,
     ErrorResponse,
     HealthStatus,
+    ComponentStatus,
+    ReadinessStatus,
+    SessionMemorySnapshot,
+    SessionMemorySections,
     SearchType
 )
 from agent.tools import ArtifactSearchInput, artifact_search_tool
@@ -283,6 +287,37 @@ class TestConfigurationModels:
         assert health.llm_connection is True
         assert health.version == "0.1.0"
         assert health.timestamp == now
+
+    def test_readiness_status(self):
+        now = datetime.now()
+        readiness = ReadinessStatus(
+            status="degraded",
+            version="0.1.0",
+            timestamp=now,
+            components={
+                "database": ComponentStatus(enabled=True, healthy=True, detail="ok"),
+                "redis_cache": ComponentStatus(enabled=True, healthy=False, detail="down"),
+            },
+        )
+
+        assert readiness.status == "degraded"
+        assert readiness.components["database"].healthy is True
+        assert readiness.components["redis_cache"].healthy is False
+
+    def test_session_memory_snapshot(self):
+        snapshot = SessionMemorySnapshot(
+            session_id="session-123",
+            latest_summary="当前讨论对象：Agentic RAG",
+            compression_count=2,
+            compacted_message_count=6,
+            using_summary_context=True,
+            summary_sections=SessionMemorySections(current_topic="Agentic RAG"),
+            recent_messages_preview=[],
+        )
+
+        assert snapshot.session_id == "session-123"
+        assert snapshot.compression_count == 2
+        assert snapshot.summary_sections.current_topic == "Agentic RAG"
 
 
 class TestArtifactSearchToolModels:
