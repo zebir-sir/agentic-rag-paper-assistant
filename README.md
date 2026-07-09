@@ -16,7 +16,6 @@
 ![RabbitMQ](https://img.shields.io/badge/RabbitMQ-Async_Ingestion-FF6600?style=for-the-badge&logo=rabbitmq&logoColor=white)
 ![Redis](https://img.shields.io/badge/Redis-Query_Cache-DC382D?style=for-the-badge&logo=redis&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
-![Tests](https://img.shields.io/badge/Core_Tests-86%20passed-brightgreen?style=for-the-badge)
 
 <br />
 
@@ -27,7 +26,8 @@
 [系统架构](#-系统架构) ·
 [快速开始](#-快速开始) ·
 [测试与评测](#-测试与评测) ·
-[项目结构](#-项目结构)
+[项目结构](#-项目结构) ·
+[Roadmap](#-roadmap)
 
 </div>
 
@@ -93,7 +93,7 @@
 | `general_web` | Web Search Provider | 通用网页资料、最新信息、非论文来源 | 可选能力，未配置时不会伪造联网结果 |
 | `model_knowledge` | Direct Answer | 普通知识解释、无须证据的对话 | 不能替代本地论文证据 |
 
-这个设计避免了 RAG 项目里很常见的“用本地文档冒充联网搜索”“用模型常识冒充论文证据”的问题。
+这个设计让回答生成前的来源选择、工具调用和结果解释更清晰，也方便在多源检索场景下保留可追踪的证据链。
 
 ### 2. LangGraph 节点化工作流
 
@@ -115,7 +115,7 @@ initial_intent_planning
   -> finalize
 ```
 
-这样做的价值是每个阶段都有明确职责，检索失败、来源不可用、证据不足、回答越界都能在 metadata 中留下可调试信息，方便测试和回归。
+每个阶段都有明确职责，检索失败、来源不可用、证据不足、回答越界等状态都会写入 metadata，便于观察、测试和回归。
 
 ### 3. 证据驱动的回答生成
 
@@ -126,7 +126,7 @@ initial_intent_planning
 - evidence reference 数量是否足够；
 - citation risk 是否需要写入 metadata。
 
-这不是完整的形式化事实验证，但对秋招项目来说，它已经能体现“不是只靠 prompt 要求模型别胡说，而是在 runtime 中显式检查回答质量”。
+这套机制把“回答是否有依据”从纯 prompt 约束前移到 runtime 层，适合在论文问答、实验对比和方法总结等场景中提升可核查性。
 
 ### 4. 异步入库与可降级中间件
 
@@ -150,7 +150,7 @@ Redis 只作为轻量缓存层，不替代 PostgreSQL/pgvector 的主存储。Ra
 - health / readiness；
 - 配置读取与运行时快照。
 
-这些能力不一定“炫”，但非常适合在 AI 应用工程师 / Agent 工程师面试中说明项目不是一次性脚本。
+这些能力让系统不仅能完成本地演示，也便于在 Docker、本地服务和私有化部署环境中进行排查与维护。
 
 ---
 
@@ -327,7 +327,7 @@ curl http://localhost:8000/readiness
 
 ## 🧪 测试与评测
 
-项目保留了核心单元测试、真实链路测评和工程化展示测评，用于证明入库、检索、来源边界、检索恢复、中间件、缓存降级和多轮记忆等链路可以回归。
+项目包含核心单元测试、真实链路测评和工程化展示测评，用于回归检查入库、检索、来源边界、检索恢复、中间件、缓存降级和多轮记忆等关键链路。
 
 ```bash
 # 核心 Agent / runtime / middleware 测试
@@ -340,9 +340,9 @@ python evals/run_real_chain_eval.py
 python evals/run_engineering_showcase_eval.py
 ```
 
-当前报告位于 `evals/results/real_chain_eval.md` 和 `evals/results/engineering_showcase_eval.md`。评测结果主要用于项目展示和回归检查，详细设计见 [docs/EVALUATION.md](docs/EVALUATION.md) 与 [evals/README.md](evals/README.md)。
+当前报告位于 `evals/results/real_chain_eval.md` 和 `evals/results/engineering_showcase_eval.md`。详细设计见 [docs/EVALUATION.md](docs/EVALUATION.md) 与 [evals/README.md](evals/README.md)。
 
-> 说明：全量 `pytest tests -q` 在 Windows 本地环境中可能受 `docling -> transformers -> torch` 原生 DLL 影响；涉及 Docling 的完整入库链路建议在 Docker 或 Linux 环境中验证。
+涉及 PDF 解析和完整入库的链路推荐使用 Docker 环境验证，便于复现 Docling、torch 和系统依赖。
 
 ---
 
@@ -401,29 +401,15 @@ agentic_rag_project-main2/
 
 ---
 
-## 🎯 面试展示重点
+## 🧭 Roadmap
 
-如果用于 AI 应用工程师 / Agent 工程师秋招，可以重点讲这几条：
-
-1. **不是普通 RAG**：项目针对论文场景做了 section-aware chunking、artifact evidence、source boundary 和 evidence tracing。
-2. **Agent workflow 可解释**：LangGraph 把规划、检索、重试、生成、审查拆成节点，方便观察、测试和定位问题。
-3. **工程化不是摆设**：有 FastAPI + Streamlit + PostgreSQL/pgvector + RabbitMQ + Redis + Docker Compose + health/readiness + metrics。
-4. **多轮对话有状态管理**：不是简单拼历史，而是做了问题补全、会话摘要、调试字段过滤和上下文约束继承。
-5. **质量控制有闭环**：有检索质量判断、query rewrite、answer review、citation review 和多套 eval scripts。
-
----
-
-## 📌 当前边界
-
-当前版本已经覆盖科研论文 RAG 的核心链路，但仍有一些明确边界：
-
-- 对扫描版 PDF、复杂图片理解和公式级解析的支持依赖 Docling 能力，尚未做专门 OCR/视觉模型增强；
-- citation review 是轻量启发式审查，不等同于严格的自然语言蕴含验证；
-- 大规模公开 benchmark 不是当前目标，现有评测更偏工程回归和链路诊断；
-- 涉及 Docling / torch 的本地 Windows 运行环境可能受 native dependency 影响，推荐使用 Docker 或 Linux 环境验证完整入库链路。
+- 增强 PDF 页码级 evidence 映射，让回答引用可以进一步定位到原文页面。
+- 完善异步入库任务的进度展示、失败重试和批量任务管理。
+- 扩展多文档对比、related work 分析和结构化论文卡片导出能力。
+- 补充更完整的端到端评测数据集，覆盖论文总结、方法对比、实验指标检索和多轮追问场景。
 
 ---
 
 ## 📄 License
 
-本项目用于个人学习、科研辅助和工程能力展示。具体使用请遵守依赖库、模型服务和论文数据来源的许可要求。
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
