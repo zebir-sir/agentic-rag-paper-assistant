@@ -2068,6 +2068,8 @@ async def answer_review_node(state: LangGraphAnalysisState) -> LangGraphAnalysis
     metadata["citation_invalid_ref_ids"] = list(citation_review.invalid_ref_ids)
     metadata["citation_missing_claim_count"] = len(citation_review.missing_citation_claims)
     metadata["citation_missing_claims"] = list(citation_review.missing_citation_claims)
+    metadata["citation_unsupported_claim_count"] = len(citation_review.unsupported_citation_claims)
+    metadata["citation_unsupported_claims"] = list(citation_review.unsupported_citation_claims)
     metadata["evidence_reference_count"] = citation_review.reference_count
     next_state["evidence_references"] = [ref.model_dump() for ref in evidence_references]
     next_state["metadata"] = metadata

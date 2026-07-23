@@ -4,6 +4,7 @@
 
 import pytest
 import json
+from pathlib import Path
 from unittest.mock import Mock, AsyncMock, patch
 from datetime import datetime, timezone, timedelta
 
@@ -26,6 +27,16 @@ from agent.ingestion_tasks_db import (
     get_ingestion_task,
     update_ingestion_task_status,
 )
+
+
+def test_schema_is_idempotent_and_does_not_drop_data():
+    schema_path = Path(__file__).resolve().parents[2] / "sql" / "schema.sql"
+    schema = schema_path.read_text(encoding="utf-8").upper()
+
+    assert "DROP TABLE" not in schema
+    assert "DROP INDEX" not in schema
+    assert "CREATE TABLE IF NOT EXISTS DOCUMENTS" in schema
+    assert "CREATE INDEX IF NOT EXISTS IDX_CHUNKS_EMBEDDING" in schema
 
 
 class TestDatabasePool:

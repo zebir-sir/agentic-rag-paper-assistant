@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
+from .evidence_support_policy import is_citation_claim_supported
+
 
 @dataclass(frozen=True)
 class EvidenceReference:
@@ -44,12 +46,13 @@ class CitationReviewResult:
     citation_count: int
     invalid_ref_ids: List[int] = field(default_factory=list)
     missing_citation_claims: List[str] = field(default_factory=list)
+    unsupported_citation_claims: List[str] = field(default_factory=list)
     cited_ref_ids: List[int] = field(default_factory=list)
     reference_count: int = 0
 
     @property
     def risk(self) -> int:
-        if self.invalid_ref_ids:
+        if self.invalid_ref_ids or self.unsupported_citation_claims:
             return 2
         if self.missing_citation_claims:
             return 1
@@ -61,6 +64,7 @@ class CitationReviewResult:
             "citation_count": self.citation_count,
             "invalid_ref_ids": list(self.invalid_ref_ids),
             "missing_citation_claims": list(self.missing_citation_claims),
+            "unsupported_citation_claims": list(self.unsupported_citation_claims),
             "cited_ref_ids": list(self.cited_ref_ids),
             "reference_count": self.reference_count,
             "risk": self.risk,
@@ -206,10 +210,23 @@ def review_answer_citations(
     cited_ref_ids = extract_citation_ids(answer)
     invalid_ref_ids = [ref_id for ref_id in cited_ref_ids if ref_id not in valid_ref_ids]
     missing_claims: List[str] = []
+    unsupported_citation_claims: List[str] = []
     for unit in _claim_units(answer):
-        if _looks_like_evidence_claim(unit) and not extract_citation_ids(unit):
+        cited_for_unit = extract_citation_ids(unit)
+        if _looks_like_evidence_claim(unit) and not cited_for_unit:
             missing_claims.append(_clean_text(unit, limit=180))
         if len(missing_claims) >= 5:
+            break
+
+        valid_unit_refs = [ref for ref in references or [] if ref.ref_id in cited_for_unit]
+        if (
+            cited_for_unit
+            and valid_unit_refs
+            and _looks_like_evidence_claim(unit)
+            and not is_citation_claim_supported(unit, [ref.snippet for ref in valid_unit_refs])
+        ):
+            unsupported_citation_claims.append(_clean_text(unit, limit=180))
+        if len(unsupported_citation_claims) >= 5:
             break
 
     return CitationReviewResult(
@@ -217,6 +234,7 @@ def review_answer_citations(
         citation_count=len(cited_ref_ids),
         invalid_ref_ids=invalid_ref_ids,
         missing_citation_claims=missing_claims,
+        unsupported_citation_claims=unsupported_citation_claims,
         cited_ref_ids=cited_ref_ids,
         reference_count=len(references or []),
     )

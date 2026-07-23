@@ -55,3 +55,49 @@ def test_review_answer_citations_flags_invalid_ref_and_uncited_claim():
     assert result.risk == 2
     assert result.invalid_ref_ids == [2]
     assert result.missing_citation_claims
+
+
+def test_review_answer_citations_flags_claim_that_drifts_from_cited_evidence():
+    refs = build_evidence_references(
+        [
+            {
+                "document_id": "d1",
+                "chunk_id": "c1",
+                "document_title": "Hybrid-RRT",
+                "content": "The method improves success rate by 40.83%.",
+                "score": 0.88,
+                "metadata": {},
+            }
+        ]
+    )
+
+    result = review_answer_citations(
+        answer="The method improves success rate by 99% [1].",
+        references=refs,
+    )
+
+    assert result.invalid_ref_ids == []
+    assert result.unsupported_citation_claims == ["The method improves success rate by 99% [1]."]
+    assert result.risk == 2
+
+
+def test_review_answer_citations_accepts_supported_cited_claim():
+    refs = build_evidence_references(
+        [
+            {
+                "document_id": "d1",
+                "chunk_id": "c1",
+                "document_title": "Hybrid-RRT",
+                "content": "The method improves success rate by 40.83%.",
+                "score": 0.88,
+                "metadata": {},
+            }
+        ]
+    )
+
+    result = review_answer_citations(
+        answer="The method improves success rate by 40.83% [1].",
+        references=refs,
+    )
+
+    assert result.unsupported_citation_claims == []

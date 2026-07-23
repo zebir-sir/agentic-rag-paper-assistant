@@ -707,7 +707,12 @@ class ChatRuntime:
     explicit_general_web_request: bool
     is_local_question: bool
     has_local_evidence: bool
-    simple_chat_decision: SimpleChatDecision
+    simple_chat_decision: SimpleChatDecision = field(
+        default_factory=lambda: SimpleChatDecision(
+            enabled=False,
+            reason="not_evaluated",
+        )
+    )
     workflow_metadata: Dict[str, Any] = field(default_factory=dict)
 
 

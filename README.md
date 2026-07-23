@@ -67,7 +67,7 @@
 | **Source-aware Intent Planner** | Planner 输出结构化 `IntentPlan`，区分用户意图、目标来源、可用工具、不可用能力和回答边界。 |
 | **LangGraph Agent Workflow** | 将复杂问答拆成意图规划、文档检查、范围解析、检索规划、检索执行、质量评估、重写重试、生成、证据检查、回答审查和最终整理。 |
 | **Multi-turn Memory** | 支持会话历史解析、问题补全、上下文压缩和多轮约束继承，适合连续分析同一篇或多篇论文。 |
-| **Evidence Citation Review** | 为检索片段生成编号引用，要求关键事实声明带引用标记，并记录缺失引用、非法引用和证据覆盖风险。 |
+| **Evidence Citation Review** | 为检索片段生成编号引用，要求关键事实声明带引用标记，并记录缺失引用、非法引用、引用与证据不一致的断言和证据覆盖风险。 |
 | **Answer Review Runtime** | 对本地论文问答中的未支撑数字、机制断言和证据缺口进行轻量审查，必要时追加风险提示。 |
 | **Fast Chat Path** | 对普通聊天、简单解释和无需检索的问题走轻量路径，避免所有请求都进入重型 RAG workflow。 |
 | **Async Ingestion** | 支持 RabbitMQ 任务投递、worker 消费、任务状态记录和失败信息回传，适合批量 PDF 入库。 |
@@ -123,6 +123,7 @@ initial_intent_planning
 
 - 是否引用了不存在的 evidence id；
 - 是否存在关键事实声明没有引用；
+- 引用的证据是否支持该事实声明，避免将不匹配的数字或结论归因给正确的编号；
 - evidence reference 数量是否足够；
 - citation risk 是否需要写入 metadata。
 
@@ -136,6 +137,8 @@ PDF 解析和 embedding 是典型慢任务。项目提供两条路径：
 - 批量 PDF 或较大文件可以投递到 RabbitMQ，由 worker 后台处理。
 
 Redis 只作为轻量缓存层，不替代 PostgreSQL/pgvector 的主存储。RabbitMQ 和 Redis 都设计成可选增强能力，不可用时主流程可以降级或给出明确错误，而不是静默失败。
+
+数据库初始化脚本可重复执行：仅在表和索引不存在时创建对象，不会在服务启动或部署时删除已有论文、会话和入库任务数据。
 
 ### 5. 面向部署的运行时能力
 
@@ -362,6 +365,7 @@ agentic_rag_project-main2/
 │   ├── simple_chat_runtime.py          # 非检索问题轻量回答路径
 │   ├── answer_review_runtime.py        # 回答证据风险审查
 │   ├── evidence_citation_runtime.py    # evidence 引用构建与引用审查
+│   ├── evidence_support_policy.py       # 引用事实与证据片段的一致性检查
 │   ├── prompt_registry.py              # Prompt registry 与兼容层
 │   ├── rabbitmq_producer.py            # 异步入库任务投递
 │   ├── ingestion_worker.py             # RabbitMQ worker 消费与入库

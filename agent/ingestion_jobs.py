@@ -385,7 +385,7 @@ async def submit_async_ingestion_task(payload: Dict[str, Any]) -> Dict[str, Any]
         )
     except Exception as exc:
         updated = await update_ingestion_task_status(
-            task_id=task_id,
+            task_id=str(task["task_id"]),
             status="failed",
             error_message=str(exc),
         )
@@ -393,7 +393,7 @@ async def submit_async_ingestion_task(payload: Dict[str, Any]) -> Dict[str, Any]
             status_code=503,
             detail={
                 "message": "Failed to publish ingestion task to RabbitMQ",
-                "task_id": task_id,
+                "task_id": task["task_id"],
                 "error": str(exc),
                 "task": updated,
             },
