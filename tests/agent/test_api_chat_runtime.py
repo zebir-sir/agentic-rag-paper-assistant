@@ -5,8 +5,14 @@ from unittest.mock import AsyncMock, patch
 if not hasattr(langchain_agents, "create_agent"):
     langchain_agents.create_agent = lambda *args, **kwargs: None
 
-from agent.api import prepare_chat_runtime
+from agent.api import openalex_status, prepare_chat_runtime
 from agent.models import ChatRequest
+
+
+@pytest.mark.asyncio
+async def test_openalex_status_reports_capability_state():
+    with patch("agent.api._is_openalex_enabled", return_value=True):
+        assert await openalex_status() == {"enabled": True}
 
 
 @pytest.mark.asyncio

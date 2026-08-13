@@ -77,6 +77,7 @@ from .db_utils import (
     delete_document_annotation,
 )
 from .app_config import get_rabbitmq_url
+from .openalex_router import _is_openalex_enabled
 from .ingestion_tasks_db import (
     delete_ingestion_task,
     get_ingestion_task,
