@@ -43,6 +43,7 @@ def test_schema_is_idempotent_and_does_not_drop_data():
     assert "CREATE TABLE IF NOT EXISTS ARTIFACTS" in schema
     assert "CREATE TABLE IF NOT EXISTS PAPER_GRAPH_NODES" in schema
     assert "CREATE TABLE IF NOT EXISTS PAPER_GRAPH_EDGES" in schema
+    assert "DROP CONSTRAINT IF EXISTS INGESTION_TASKS_STATUS_CHECK" not in schema
 
 
 class TestDatabasePool:

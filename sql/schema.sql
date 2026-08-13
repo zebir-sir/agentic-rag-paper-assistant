@@ -233,9 +233,17 @@ ALTER TABLE ingestion_tasks ADD COLUMN IF NOT EXISTS queue_order BIGINT NOT NULL
 ALTER TABLE ingestion_tasks ADD COLUMN IF NOT EXISTS progress_percent INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE ingestion_tasks ADD COLUMN IF NOT EXISTS progress_stage TEXT NOT NULL DEFAULT '等待入库';
 ALTER TABLE ingestion_tasks ALTER COLUMN fast SET DEFAULT FALSE;
-ALTER TABLE ingestion_tasks DROP CONSTRAINT IF EXISTS ingestion_tasks_status_check;
-ALTER TABLE ingestion_tasks ADD CONSTRAINT ingestion_tasks_status_check
-    CHECK (status IN ('queued', 'processing', 'paused', 'done', 'failed', 'paused_quota', 'deleted'));
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'ingestion_tasks'::regclass
+          AND conname = 'ingestion_tasks_status_check'
+    ) THEN
+        ALTER TABLE ingestion_tasks ADD CONSTRAINT ingestion_tasks_status_check
+            CHECK (status IN ('queued', 'processing', 'paused', 'done', 'failed', 'paused_quota', 'deleted'));
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_ingestion_tasks_status ON ingestion_tasks (status);
 CREATE INDEX IF NOT EXISTS idx_ingestion_tasks_created_at ON ingestion_tasks (created_at DESC);
