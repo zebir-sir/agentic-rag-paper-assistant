@@ -11,9 +11,13 @@
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![React](https://img.shields.io/badge/React-Vite-61DAFB?style=for-the-badge&logo=react&logoColor=20232A)
 ![FastAPI](https://img.shields.io/badge/FastAPI-SSE_Backend-009688?style=for-the-badge&logo=fastapi&logoColor=white)
+![LangChain](https://img.shields.io/badge/LangChain-Retrieval_Tools-1C3C3C?style=for-the-badge)
 ![LangGraph](https://img.shields.io/badge/LangGraph-Agent_Workflow-1C3C3C?style=for-the-badge)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL%20%2B%20pgvector-Evidence_Store-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
+![RabbitMQ](https://img.shields.io/badge/RabbitMQ-Async_Ingestion-FF6600?style=for-the-badge&logo=rabbitmq&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-Cache_%26_Rate_Limit-DC382D?style=for-the-badge&logo=redis&logoColor=white)
 ![Docling](https://img.shields.io/badge/Docling-Structured_PDF-2B6CB0?style=for-the-badge)
+![PDF.js](https://img.shields.io/badge/PDF.js-Interactive_Reader-FB3A3A?style=for-the-badge)
 ![Three.js](https://img.shields.io/badge/Three.js-3D_Knowledge_Graph-000000?style=for-the-badge&logo=threedotjs&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 
@@ -191,10 +195,10 @@ flowchart LR
 |---|---|
 | 前端 | React 19、Vite、Lucide、PDF.js、Three.js |
 | 后端 | FastAPI、Uvicorn、SSE、Pydantic |
-| Agent | LangChain、LangGraph、OpenAI-compatible API |
+| Agent 与模型接入 | LangChain、LangGraph、Pydantic AI、OpenAI-compatible API |
 | 文档解析 | Docling、PDFium fallback、可选视觉分析适配器 |
 | 存储与检索 | PostgreSQL 17、pgvector、pg_trgm |
-| 任务与缓存 | RabbitMQ、Redis |
+| 任务与缓存 | RabbitMQ 异步入库队列与 worker 调度；Redis 查询 embedding 缓存、限流支持与可用性降级 |
 | 评测 | pytest、真实语料检索/问答/功能契约评测 |
 | 部署 | Docker Compose，共享 runtime 镜像与 Hugging Face 缓存卷 |
 
@@ -385,16 +389,6 @@ agentic_rag_project-main2/
 ├── docker-compose.yml
 └── README.md
 ```
-
----
-
-## 🧭 后续方向
-
-- 页码级、图号级证据定位与引用展示；
-- 对低置信度标题进行用户确认与规范化，改善资料库、星图缩写和标题检索；
-- 更细粒度的 artifact context 切分，减少过长表格 chunk；
-- 更多跨领域论文语料和人工金标开放式问答评测；
-- 可导出的研究脉络、方法对比与创新假设报告。
 
 ## 📄 License
 
