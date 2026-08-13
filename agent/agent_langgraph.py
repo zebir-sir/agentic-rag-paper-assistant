@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, TypedDict
 
@@ -23,9 +24,18 @@ from .intent_planner import (
 from .langchain_tools import build_langchain_tools
 from .models import EvidenceSource, ToolCall
 from .planner_runtime import execute_intent_plan_steps, summarize_hits_for_planner
+from .graph_runtime import get_graph_neighbor_document_ids
+from .graph_relation_policy import select_graph_relations
+from .retrieval_harness_policy import (
+    compile_retrieval_contract,
+    enforce_retrieval_contract,
+    evaluate_retrieval_contract,
+)
+from .retrieval_harness_schema import RetrievalContract
 from .prompts import SYSTEM_PROMPT
 from .tools import DocumentListInput, is_general_web_search_enabled, list_documents_tool
 from .openalex_router import _is_openalex_enabled
+from .warning_text import clean_legacy_warning_text
 
 
 class LangGraphAnalysisState(TypedDict, total=False):
@@ -43,6 +53,7 @@ class LangGraphAnalysisState(TypedDict, total=False):
     warnings: List[str]
     metadata: Dict[str, Any]
     progress_callback: Optional[Callable[[str], Awaitable[None]]]
+    answer_callback: Optional[Callable[[str], Awaitable[None]]]
     current_query: str
     retrieval_attempt_count: int
     retrieval_attempts: List[Dict[str, Any]]
@@ -54,6 +65,7 @@ class LangGraphAnalysisState(TypedDict, total=False):
     skip_rewrite: bool
     suggested_rewrite_query: str
     retrieval_evaluation: Dict[str, Any]
+    retrieval_contract: Dict[str, Any]
     target_document_id: str
     target_document_title: str
     answer_scope: Dict[str, Any]
@@ -134,6 +146,10 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _planner_timeout_seconds() -> float:
+    return max(3.0, _env_float("LANGGRAPH_PLANNER_TIMEOUT_SECONDS", 12.0))
+
+
 def _build_planner_capabilities(deps: Optional[AgentDependencies] = None) -> PlannerCapabilities:
     search_preferences = (deps.search_preferences or {}) if deps is not None else {}
     user_allow_web = bool(
@@ -157,17 +173,6 @@ def _build_planner_capabilities(deps: Optional[AgentDependencies] = None) -> Pla
         direct_answer_enabled=True,
         max_tools=2,
     )
-
-
-def clean_legacy_warning_text(text: str, drop_warning: bool = False) -> str:
-    value = str(text or "")
-    legacy_full = "当前没有检索到直接相关片段，以下内容更适合作为一般性分析参考。"
-    legacy_tail = "以下内容更适合作为一般性分析参考。"
-    neutral_full = "本轮没有可核对的检索片段；未被检索证据支持的结论请谨慎参考。"
-    neutral_tail = "未被检索证据支持的结论请谨慎参考。"
-    if drop_warning:
-        return value.replace(legacy_full, "").replace(legacy_tail, "").strip()
-    return value.replace(legacy_full, neutral_full).replace(legacy_tail, neutral_tail)
 
 
 def _build_runtime_decision_summary(metadata: Dict[str, Any]) -> str:
@@ -196,6 +201,12 @@ def _build_runtime_decision_summary(metadata: Dict[str, Any]) -> str:
     lines.append(f"- retrieval_attempt_count: {metadata.get('retrieval_attempt_count')}")
     lines.append(f"- tools_planned: {metadata.get('tools_planned')}")
     lines.append(f"- tools_executed: {metadata.get('tools_executed')}")
+    contract = metadata.get("retrieval_contract") or {}
+    if isinstance(contract, dict) and contract:
+        lines.append(f"- retrieval_contract.required_sources: {contract.get('required_source_types')}")
+        lines.append(f"- retrieval_contract.allowed_sources: {contract.get('allowed_source_types')}")
+        lines.append(f"- retrieval_contract.max_tool_calls_per_round: {contract.get('max_tool_calls_per_round')}")
+        lines.append(f"- retrieval_contract_evaluation: {metadata.get('retrieval_contract_evaluation')}")
     return "\n".join(lines)
 
 
@@ -212,12 +223,33 @@ async def initial_intent_planning_node(state: LangGraphAnalysisState) -> LangGra
     except Exception:
         model = None
 
-    planner_debug = await plan_user_intent_debug(
-        question=question,
-        context_hint=context_prompt,
-        model=model,
-        capabilities=capabilities,
-    )
+    try:
+        planner_debug = await asyncio.wait_for(
+            plan_user_intent_debug(
+                question=question,
+                context_hint=context_prompt,
+                model=model,
+                capabilities=capabilities,
+            ),
+            timeout=_planner_timeout_seconds(),
+        )
+    except asyncio.TimeoutError:
+        fallback_plan = build_fallback_intent_plan(
+            question,
+            capabilities=capabilities,
+            reason="Intent planner timed out; using the deterministic fallback plan.",
+        )
+        fallback_plan = normalize_intent_plan(
+            {**fallback_plan.model_dump(), "question": question},
+            capabilities=capabilities,
+        )
+        planner_debug = {
+            "normalized_plan": fallback_plan.model_dump(),
+            "fallback_used": True,
+            "fallback_reason": "intent_planner_timeout",
+            "fallback_decision": "timeout_fallback",
+            "raw_model_content_preview": "",
+        }
     plan_payload = dict(planner_debug.get("normalized_plan") or {})
     next_state["intent_plan"] = plan_payload
     planner_decision = {
@@ -225,6 +257,11 @@ async def initial_intent_planning_node(state: LangGraphAnalysisState) -> LangGra
         "needs_retrieval": bool(plan_payload.get("needs_retrieval")),
         "direct_answer_allowed": bool(plan_payload.get("direct_answer_allowed")),
         "allow_external_sources": bool(plan_payload.get("allow_external_sources")),
+        "use_paper_graph": bool(plan_payload.get("use_paper_graph")),
+        "graph_usage_reason": str(plan_payload.get("graph_usage_reason") or ""),
+        "graph_relation_types": list(plan_payload.get("graph_relation_types") or []),
+        "graph_direction": str(plan_payload.get("graph_direction") or "both"),
+        "graph_neighbor_limit": int(plan_payload.get("graph_neighbor_limit") or 0),
         "planned_tools": [
             step.get("tool")
             for step in list(plan_payload.get("retrieval_steps") or [])
@@ -362,6 +399,7 @@ def parse_answer_scope(raw_text: str, documents: List[Dict[str, Any]]) -> Dict[s
                     "title": str(item.get("title") or docs_by_id[did].get("title") or "").strip(),
                     "confidence": conf,
                     "match_reason": str(item.get("match_reason") or "").strip(),
+                    "document_language": str((docs_by_id[did].get("metadata") or {}).get("document_language") or "").strip().lower(),
                 }
             )
 
@@ -421,6 +459,7 @@ def _extract_explicit_target_documents(question: str, documents: List[Dict[str, 
                 "title": str(doc.get("title") or "").strip(),
                 "confidence": 1.0,
                 "match_reason": "explicit document_id in user prompt",
+                "document_language": str((doc.get("metadata") or {}).get("document_language") or "").strip().lower(),
             }
         )
     return targets
@@ -431,8 +470,36 @@ async def resolve_answer_scope_node(state: LangGraphAnalysisState) -> LangGraphA
     question = str(next_state.get("question") or "").strip()
     documents = list(next_state.get("documents") or [])
     fallback = parse_answer_scope("", documents)
+    deps = next_state.get("deps")
+    search_preferences = dict(getattr(deps, "search_preferences", {}) or {})
+    selected_document_ids = {
+        str(document_id).strip()
+        for document_id in (search_preferences.get("selected_document_ids") or [])
+        if str(document_id).strip()
+    }
+    selected_targets = [
+        {
+            "document_id": str(document.get("id") or "").strip(),
+            "title": str(document.get("title") or "").strip(),
+            "confidence": 1.0,
+            "match_reason": "selected in research scope",
+            "document_language": str((document.get("metadata") or {}).get("document_language") or "").strip().lower(),
+        }
+        for document in documents
+        if str(document.get("id") or "").strip() in selected_document_ids
+    ]
     explicit_targets = _extract_explicit_target_documents(question, documents)
-    if explicit_targets:
+    if selected_targets:
+        allow_supplemental = bool(search_preferences.get("allow_supplemental", True))
+        parsed = {
+            "scope_policy": "prefer_target" if allow_supplemental else "strict_target",
+            "target_documents": selected_targets,
+            "allow_supplemental": allow_supplemental,
+            "scope_resolver_used": True,
+            "scope_reason": "User selected research-scope documents.",
+            "answer_instruction": "Prioritize the documents selected in the research scope.",
+        }
+    elif explicit_targets:
         parsed = {
             "scope_policy": "strict_target",
             "target_documents": explicit_targets,
@@ -445,11 +512,14 @@ async def resolve_answer_scope_node(state: LangGraphAnalysisState) -> LangGraphA
         try:
             model = get_langchain_chat_model()
             prompt = build_answer_scope_prompt(question, documents)
-            response = await model.ainvoke(
-                [
-                    {"role": "system", "content": "Return strict JSON only."},
-                    {"role": "user", "content": prompt},
-                ]
+            response = await asyncio.wait_for(
+                model.ainvoke(
+                    [
+                        {"role": "system", "content": "Return strict JSON only."},
+                        {"role": "user", "content": prompt},
+                    ]
+                ),
+                timeout=_planner_timeout_seconds(),
             )
             parsed = parse_answer_scope(_extract_response_text(response), documents)
         except Exception as exc:
@@ -480,9 +550,11 @@ async def inspect_documents_node(state: LangGraphAnalysisState) -> LangGraphAnal
         phase="document_inspection",
     )
     try:
-        documents = await list_documents_tool(DocumentListInput(limit=5, offset=0))
+        # Scope resolution must see the full personal corpus. A five-document
+        # sample can silently bind a named-paper question to the wrong paper.
+        documents = await list_documents_tool(DocumentListInput(limit=100, offset=0))
         next_state["documents"] = [_doc_to_dict(doc) for doc in documents]
-        _append_tool_call(next_state, "list_documents", {"limit": 5, "offset": 0})
+        _append_tool_call(next_state, "list_documents", {"limit": 100, "offset": 0})
     except Exception as exc:
         next_state["documents"] = []
         _append_warning(next_state, f"list_documents failed: {exc}")
@@ -632,6 +704,16 @@ def _extract_target_ids(target_documents: List[Dict[str, Any]]) -> List[str]:
     return [str(d.get("document_id") or "").strip() for d in (target_documents or []) if str(d.get("document_id") or "").strip()]
 
 
+def _resolve_target_embedding_language(target_documents: List[Dict[str, Any]]) -> Optional[str]:
+    """Return a corpus route only when every selected target uses one known language."""
+    languages = {
+        str(document.get("document_language") or "").strip().lower()
+        for document in (target_documents or [])
+        if str(document.get("document_language") or "").strip().lower() in {"zh", "en"}
+    }
+    return next(iter(languages)) if len(languages) == 1 else None
+
+
 def _apply_scope_policy_to_hits(
     hits: List[Dict[str, Any]],
     scope_policy: str,
@@ -755,7 +837,7 @@ def build_retrieval_evaluation_prompt(
         "If answerable=false, missing_aspects should extract concrete entities/scenarios/terms/constraints from the user question whenever possible.\n"
         "If answerable=false, provide suggested_query for the next local knowledge-base retrieval and preserve concrete keywords from the user question.\n"
         "Do not invent paper-specific facts that are not supported by snippets.\n"
-        "Prefer compact keyword-style query, e.g., 'Hybrid-RRT 火星通信延迟 低重力 外太空部署 失败案例' or English equivalent.\n"
+        "Prefer a compact keyword-style query that preserves the user's research topic, method names, entities, constraints, and requested evidence.\n"
         "Return strict JSON only with schema:\n"
         '{"answerable": bool, "confidence": float, "needs_retry": bool, "reason": str, '
         '"missing_aspects": [str], "suggested_query": str, "supporting_hit_indices": [int]}\n\n'
@@ -981,7 +1063,15 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
         planner_reused_from_initial_intent = False
         raw_intent_plan = next_state.get("intent_plan")
 
-        if (attempt_count == 1 or execute_preplanned_only) and isinstance(raw_intent_plan, dict) and raw_intent_plan:
+        explicit_scope_plan = isinstance(raw_intent_plan, dict) and str(raw_intent_plan.get("reason") or "") in {
+            "Explicit paper and section scope.",
+            "Explicit knowledge-star-map relationship request.",
+            "Explicit OpenAlex request.",
+            "Explicit named-paper evidence request.",
+            "Explicit named-paper non-prose evidence request.",
+            "Explicit named-paper experiment or evaluation request.",
+        }
+        if (attempt_count == 1 or execute_preplanned_only or explicit_scope_plan) and isinstance(raw_intent_plan, dict) and raw_intent_plan:
             try:
                 plan = IntentPlan.model_validate(raw_intent_plan)
                 planner_used = bool(metadata.get("planner_used") or metadata.get("intent_planner_used") or True)
@@ -1033,6 +1123,64 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
                 reason=fallback_reason,
             )
 
+        target_document_ids = _extract_target_ids(list(next_state.get("target_documents") or []))
+        graph_seed_document_ids = list(target_document_ids)
+        graph_expanded_document_ids = list(metadata.get("graph_expanded_document_ids") or [])
+        graph_usage_reason = str(metadata.get("paper_graph_usage_reason") or "")
+        graph_enabled = bool((getattr(deps, "search_preferences", {}) or {}).get("use_paper_graph", True))
+        graph_scope_active = bool(plan.use_paper_graph or graph_expanded_document_ids)
+        graph_relation_types = list(plan.graph_relation_types or [])
+        graph_direction = str(plan.graph_direction or "both")
+        graph_relation_policy_fallback = False
+        if (
+            graph_scope_active
+            and graph_enabled
+            and target_document_ids
+            and str(next_state.get("scope_policy") or "") != "strict_target"
+        ):
+            if not execute_preplanned_only:
+                try:
+                    if not graph_relation_types:
+                        relation_selection = select_graph_relations(question)
+                        graph_relation_types = relation_selection.relation_types
+                        graph_direction = relation_selection.direction
+                        graph_relation_policy_fallback = True
+                    graph_expanded_document_ids = await get_graph_neighbor_document_ids(
+                        target_document_ids,
+                        limit=plan.graph_neighbor_limit,
+                        relation_types=graph_relation_types,
+                        direction=graph_direction,
+                    )
+                    graph_usage_reason = str(plan.graph_usage_reason or "planner_requested_cross_paper_expansion")
+                    metadata["paper_graph_relation_types"] = graph_relation_types
+                    metadata["paper_graph_direction"] = graph_direction
+                    metadata["paper_graph_relation_policy_fallback"] = graph_relation_policy_fallback
+                except Exception as exc:
+                    _append_warning(next_state, f"paper graph scope expansion skipped: {exc}")
+            target_document_ids = list(dict.fromkeys(target_document_ids + graph_expanded_document_ids))
+        elif graph_scope_active and not graph_enabled:
+            graph_usage_reason = "disabled_by_request"
+        elif graph_scope_active and str(next_state.get("scope_policy") or "") == "strict_target":
+            graph_usage_reason = "blocked_by_strict_target_scope"
+        elif graph_scope_active and not target_document_ids:
+            graph_usage_reason = "no_graph_seed_documents"
+        try:
+            contract = RetrievalContract.model_validate(metadata.get("retrieval_contract") or {})
+        except Exception:
+            contract = compile_retrieval_contract(
+                plan,
+                scope_policy=str(next_state.get("scope_policy") or "broad_kb"),
+                target_document_ids=target_document_ids,
+                allow_supplemental=bool(next_state.get("allow_supplemental", True)),
+                max_retrieval_rounds=int(
+                    next_state.get("max_retrieval_attempts")
+                    or _env_int("LANGGRAPH_MAX_RETRIEVAL_ATTEMPTS", 2)
+                ),
+            )
+        plan, enforcement = enforce_retrieval_contract(plan, contract)
+        if enforcement.filtered_tools:
+            _append_warning(next_state, "retrieval contract filtered incompatible planned tools")
+
         plan_payload = plan.model_dump()
         next_state["intent_plan"] = plan_payload
         planner_decision = {
@@ -1040,6 +1188,11 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
             "needs_retrieval": bool(plan.needs_retrieval),
             "direct_answer_allowed": bool(plan.direct_answer_allowed),
             "allow_external_sources": bool(plan.allow_external_sources),
+            "use_paper_graph": bool(plan.use_paper_graph),
+            "graph_usage_reason": str(plan.graph_usage_reason or ""),
+            "graph_relation_types": list(plan.graph_relation_types or []),
+            "graph_direction": str(plan.graph_direction or "both"),
+            "graph_neighbor_limit": int(plan.graph_neighbor_limit),
             "planned_tools": [step.tool for step in plan.retrieval_steps],
             "evidence_policy": plan.evidence_policy,
             "reason": plan.reason,
@@ -1058,6 +1211,14 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
         metadata["direct_answer_allowed"] = bool(plan.direct_answer_allowed)
         metadata["tools_planned"] = [step.model_dump() for step in plan.retrieval_steps]
         metadata["planned_retrieval_steps"] = [step.model_dump() for step in plan.retrieval_steps]
+        metadata["paper_graph_requested_by_planner"] = bool(plan.use_paper_graph)
+        metadata["paper_graph_usage_reason"] = graph_usage_reason
+        metadata["graph_seed_document_ids"] = graph_seed_document_ids
+        metadata["graph_expanded_document_ids"] = graph_expanded_document_ids
+        metadata["paper_graph_used"] = bool(graph_expanded_document_ids)
+        metadata["paper_graph_expanded_document_count"] = len(graph_expanded_document_ids)
+        metadata["retrieval_contract"] = contract.model_dump()
+        metadata["retrieval_contract_plan_enforcement"] = enforcement.model_dump()
         metadata["fallback_used"] = bool(planner_debug.get("fallback_used")) or planner_fallback_used
         metadata["fallback_reason"] = fallback_reason or str(planner_debug.get("fallback_reason") or "")
         metadata["fallback_decision"] = fallback_decision or str(planner_debug.get("fallback_decision") or "")
@@ -1135,6 +1296,14 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
             tools=tools,
             fallback_query=query,
             capabilities=capabilities,
+            target_document_ids=target_document_ids,
+            target_embedding_language=_resolve_target_embedding_language(
+                list(next_state.get("target_documents") or [])
+            ),
+            enforce_target_scope=(
+                str(next_state.get("scope_policy") or "") == "strict_target"
+                or bool(graph_expanded_document_ids)
+            ),
         )
         round_results = list(exec_out.get("results") or [])
         tools_planned = list(exec_out.get("planned_steps") or [step.model_dump() for step in plan.retrieval_steps])
@@ -1144,17 +1313,22 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
             _append_warning(next_state, str(warning_text))
 
         tools_executed: List[str] = []
+        execution_records: List[Dict[str, Any]] = []
         for item in tools_executed_raw:
             if isinstance(item, dict):
                 tool_name = str(item.get("tool") or "").strip()
                 if tool_name:
                     tools_executed.append(tool_name)
+                    execution_records.append(dict(item))
                     _append_tool_call(next_state, tool_name, dict(item.get("args") or {}))
             elif isinstance(item, str) and item.strip():
                 tools_executed.append(item.strip())
 
+        previous_tools = [str(value) for value in metadata.get("tools_executed") or [] if str(value).strip()]
+        previous_records = [dict(value) for value in metadata.get("retrieval_execution_records") or [] if isinstance(value, dict)]
         metadata["tools_planned"] = tools_planned
-        metadata["tools_executed"] = tools_executed
+        metadata["tools_executed"] = list(dict.fromkeys(previous_tools + tools_executed))
+        metadata["retrieval_execution_records"] = previous_records + execution_records
         metadata["filtered_unavailable_tools"] = filtered_unavailable_tools
         metadata["retrieval_skipped_by_planner"] = False
         metadata["retrieval_skip_reason"] = ""
@@ -1269,6 +1443,23 @@ async def grade_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
     )
 
     if retrieval_skipped_by_planner and direct_answer_allowed:
+        try:
+            contract = RetrievalContract.model_validate(metadata.get("retrieval_contract") or {})
+            contract_evaluation = evaluate_retrieval_contract(contract, [], [])
+        except Exception:
+            contract_evaluation = None
+        if contract_evaluation is not None and not contract_evaluation.required_sources_satisfied:
+            next_state["retrieval_sufficient"] = False
+            next_state["retrieval_insufficient_reason"] = contract_evaluation.reason
+            next_state["retrieval_top_score"] = None
+            next_state["skip_rewrite"] = True
+            metadata["retrieval_sufficient"] = False
+            metadata["retrieval_insufficient_reason"] = contract_evaluation.reason
+            metadata["retrieval_top_score"] = None
+            metadata["retrieval_retry_trigger"] = "required_source_unavailable"
+            metadata["retrieval_contract_evaluation"] = contract_evaluation.model_dump()
+            next_state["metadata"] = metadata
+            return next_state
         next_state["retrieval_sufficient"] = True
         next_state["retrieval_insufficient_reason"] = None
         next_state["retrieval_top_score"] = None
@@ -1370,6 +1561,20 @@ async def grade_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
             sufficient = True
             reason = rule_reason
 
+    contract_evaluation = None
+    try:
+        contract = RetrievalContract.model_validate(metadata.get("retrieval_contract") or {})
+        contract_evaluation = evaluate_retrieval_contract(
+            contract,
+            results,
+            list(metadata.get("retrieval_execution_records") or []),
+        )
+        if not contract_evaluation.required_sources_satisfied:
+            sufficient = False
+            reason = contract_evaluation.reason
+    except Exception as exc:
+        _append_warning(next_state, f"retrieval contract evaluation failed: {exc}")
+
     next_state["retrieval_sufficient"] = sufficient
     next_state["retrieval_insufficient_reason"] = None if sufficient else reason
     next_state["retrieval_top_score"] = top_score
@@ -1394,6 +1599,8 @@ async def grade_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
     metadata["retrieval_evaluator_reason"] = str((evaluator or {}).get("reason") or "") if evaluator else ""
     metadata["retrieval_retry_trigger"] = retrieval_retry_trigger
     metadata["suggested_rewrite_query"] = suggested_rewrite_query
+    if contract_evaluation is not None:
+        metadata["retrieval_contract_evaluation"] = contract_evaluation.model_dump()
     next_state["metadata"] = metadata
 
     if not sufficient:
@@ -1586,6 +1793,22 @@ def _extract_response_text(response: Any) -> str:
     return str(content).strip()
 
 
+def _extract_response_delta(response: Any) -> str:
+    """Extract a streaming delta without trimming Markdown whitespace."""
+    content = getattr(response, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+        return "".join(parts)
+    return str(content or "")
+
+
 async def rewrite_query_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState:
     next_state = dict(state)
     question = str(next_state.get("question") or "").strip()
@@ -1742,6 +1965,29 @@ def _humanize_warning(warning: str) -> Optional[str]:
     return None
 
 
+def _requires_retrieved_evidence(metadata: Dict[str, Any]) -> bool:
+    """Whether this turn must not fall back to model knowledge when retrieval is empty."""
+    answer_policy = dict(metadata.get("answer_policy") or {})
+    planner_decision = dict(metadata.get("planner_decision") or {})
+    return bool(
+        planner_decision.get("needs_retrieval")
+        and not planner_decision.get("direct_answer_allowed")
+        and str(answer_policy.get("mode") or "retrieve_and_answer")
+        in {"retrieve_and_answer", "answer_with_disclosure"}
+    )
+
+
+def _empty_evidence_answer(state: LangGraphAnalysisState) -> str:
+    """Safe user-facing fallback for evidence-bound questions with no retained hits."""
+    target_documents = list(state.get("target_documents") or [])
+    target_title = str((target_documents[0] or {}).get("title") or "目标论文").strip() if target_documents else "目标论文"
+    return (
+        f"这次没有从《{target_title}》中取到可直接核对的相关片段，"
+        "因此我不能把通用知识当作该论文的算法或伪代码来解释。"
+        "我会保留这次失败记录，方便继续定位该论文的结构化片段检索。"
+    )
+
+
 async def generate_analysis_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState:
     next_state = dict(state)
     build_generation_context_only = bool(next_state.pop("build_generation_context_only", False))
@@ -1756,16 +2002,31 @@ async def generate_analysis_node(state: LangGraphAnalysisState) -> LangGraphAnal
         prompt = str(next_state.get("generation_prompt") or "").strip()
         system_text = str(next_state.get("generation_system_text") or "").strip()
         retrieval_results = list(next_state.get("retrieval_results") or [])
+        if not retrieval_results and _requires_retrieved_evidence(metadata):
+            next_state["draft_answer"] = _empty_evidence_answer(next_state)
+            metadata["generation_blocked_by_missing_evidence"] = True
+            metadata["generation_answer_built"] = True
+            next_state["metadata"] = metadata
+            await _emit_answer_delta(next_state, next_state["draft_answer"])
+            return next_state
         if prompt and system_text:
             try:
                 model = get_langchain_chat_model()
-                response = await model.ainvoke(
-                    [
-                        {"role": "system", "content": system_text},
-                        {"role": "user", "content": prompt},
-                    ]
-                )
-                next_state["draft_answer"] = _extract_response_text(response)
+                messages = [
+                    {"role": "system", "content": system_text},
+                    {"role": "user", "content": prompt},
+                ]
+                streamed_parts: List[str] = []
+                if hasattr(model, "astream"):
+                    async for chunk in model.astream(messages):
+                        delta = _extract_response_delta(chunk)
+                        if delta:
+                            streamed_parts.append(delta)
+                            await _emit_answer_delta(next_state, delta)
+                next_state["draft_answer"] = "".join(streamed_parts).strip()
+                if not next_state["draft_answer"]:
+                    response = await model.ainvoke(messages)
+                    next_state["draft_answer"] = _extract_response_text(response)
             except Exception as exc:
                 _append_warning(next_state, f"analysis generation failed: {exc}")
                 fallback = "当前分析生成阶段出现异常。我会基于已有检索片段继续完成回答。"
@@ -1824,7 +2085,7 @@ async def generate_analysis_node(state: LangGraphAnalysisState) -> LangGraphAnal
         "请根据用户问题和检索片段自然组织中文回答。优先完成用户当前任务。"
         "可以综合多个片段进行总结、比较和分析。"
         "对片段明确支持的内容直接分析；对片段没有覆盖的具体点，可以自然说明边界。"
-        "回答时请区分 planner 主动跳过检索、检索失败、检索不足和已有证据回答。"
+        "planner、检索、证据分级和审核是内部控制流程；默认像自然对话中的研究助手一样直接回答，不要向用户复述这些过程。"
         "如果 planner 主动跳过检索并允许 direct answer，请直接回答，不要声称检索失败。"
         "如果执行过检索但证据不足，只在相关结论处说明证据边界。"
         "不要把主动跳过检索说成检索失败。"
@@ -1833,10 +2094,10 @@ async def generate_analysis_node(state: LangGraphAnalysisState) -> LangGraphAnal
         "如果检索证据中包含 artifact table 或 artifact algorithm，应优先依据 content 中的原始表格/算法内容回答；"
         "不得因为 UI snippet 或 caption 不完整而声称表格数据缺失。"
         "不要把证据中的精确数字改写成模糊范围。"
-        "算法机制、模块名称、实验结论必须有片段直接支撑；没有支撑时写“当前检索片段未明确说明”。"
-        "若属于合理推断，必须写“基于现有片段可推断，但仍需原文确认”。"
+        "算法机制、模块名称、实验结论必须有片段直接支撑；没有支撑时收敛措辞，必要时只简短说“不确定”。"
+        "若属于合理推断，将其作为建议或可能性自然表达，不要把推理过程展开成审计报告。"
         "不要把通用知识伪装成特定论文证据。"
-        "建议按三层表达：证据明确支持、基于片段可推断、当前证据不足。"
+        "除非用户明确要求来源、核验过程或研究证据，不要输出“证据明确支持”“基于片段可推断”“当前证据不足”、来源类型、自证段落或引用编号；来源映射由系统在后台保存。"
         "请严格遵守："
         "只能使用 allowed_source_types；不得使用 blocked_source_types；"
         "如果 must_disclose_limitations=true，必须说明能力边界；"
@@ -1914,9 +2175,13 @@ def _compose_generation_context(state: LangGraphAnalysisState) -> Tuple[str, str
         f"本轮回答策略：\n{json.dumps(answer_policy, ensure_ascii=False, indent=2) if answer_policy else 'N/A'}\n\n"
         f"当前告警：\n{chr(10).join(warnings) if warnings else '无'}\n\n"
         "请根据用户问题和检索片段自然组织中文回答。优先完成用户当前任务。"
+        "回答必须是可直接阅读的成品：直接从答案、判断或建议开始，禁止用“根据检索到的结果”“根据网络信息”“我查到”“以下是整理结果”等开场。"
+        "简单问题用自然段答完；需要展开时先给简短结论，再用最多两级、有信息量的 Markdown 标题和同级列表组织内容。"
+        "不要把格式、检索或自证当作回答内容；格式服务于阅读，不要写模板化的“基本情况”“需要说明”“证据分层”。"
         "可以综合多个片段进行总结、比较和分析。"
-        "对片段明确支持的内容直接分析；对片段没有覆盖的具体点，可以自然说明边界。"
-        "回答时请区分 planner 主动跳过检索、检索失败、检索不足和已有证据回答。"
+        "对片段明确支持的内容直接分析；对片段没有覆盖的具体点，收敛表述或仅在必要时说不确定。"
+        "检索、planner、证据分级和审核过程只供内部使用。默认像自然对话中的研究助手一样直接回答，不要输出检索过程、证据分层、来源类型、自证说明或引用编号。"
+        "仅当用户明确要求来源/核验，或高风险事实确实需要提醒时，才用一句简洁说明；来源映射由系统在后台保存。"
         "如果 planner 主动跳过检索并允许 direct answer，请直接回答，不要声称检索失败。"
         "如果执行过检索但证据不足，只在相关结论处说明证据边界。"
         "不要把主动跳过检索说成检索失败。"
@@ -1925,19 +2190,18 @@ def _compose_generation_context(state: LangGraphAnalysisState) -> Tuple[str, str
         "如果检索证据中包含 artifact table 或 artifact algorithm，应优先依据 content 中的原始表格/算法内容回答。"
         "不得因为 UI snippet 或 caption 不完整而声称表格数据缺失。"
         "不要把证据中的精确数字改写成模糊范围。"
-        "算法机制、模块名称、实验结论必须有片段直接支撑；没有支撑时写“当前检索片段未明确说明”。"
-        "若属于合理推断，必须写“基于现有片段可推断，但仍需原文确认”。"
+        "算法机制、模块名称、实验结论必须有片段直接支撑；没有支撑时不要扩写。"
         "不要把通用知识伪装成特定论文证据。"
-        "建议按三层表达：证据明确支持、基于片段可推断、当前证据不足。"
         "请严格遵守："
         "只能使用 allowed_source_types；不得使用 blocked_source_types；"
         "如果 must_disclose_limitations=true，必须说明能力边界；"
         "不得把一种来源伪装成另一种来源；"
         "如果 mode=direct_answer 或 answer_with_disclosure，不要声称执行了检索；"
         "如果 mode=retrieve_and_answer，回答必须依赖 retrieval_results。"
-        "涉及实验数字、年份、方法机制、结论对比等关键事实时，请在句尾标注证据编号，例如 [1]。"
-        "不要引用不存在的证据编号。"
+        "来源编号和证据映射由系统在后台保存；除非用户主动要求，不要输出引用编号或来源附录。"
     )
+
+
     if scope_policy == "strict_target":
         prompt += (
             "你必须只将 target_documents 作为论文证据。"
@@ -1947,6 +2211,14 @@ def _compose_generation_context(state: LangGraphAnalysisState) -> Tuple[str, str
 
     system_text = SYSTEM_PROMPT + "\n\n你正在执行 LangGraph 深度分析流程。请根据用户问题和检索片段完成分析。"
     return prompt, system_text
+
+
+async def _emit_answer_delta(state: LangGraphAnalysisState, content: str) -> None:
+    """Forward final-generation deltas without exposing internal workflow events."""
+    callback = state.get("answer_callback")
+    if callback is None or not content:
+        return
+    await callback(content)
 
 
 async def build_generation_context_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState:
@@ -2206,6 +2478,7 @@ async def run_langgraph_analysis(
     deps: AgentDependencies,
     context_prompt: Optional[str] = None,
     progress_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+    answer_callback: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> LangGraphAnalysisResult:
     graph = build_langgraph_workflow()
     initial_state: LangGraphAnalysisState = {
@@ -2221,6 +2494,7 @@ async def run_langgraph_analysis(
         "warnings": [],
         "metadata": {},
         "progress_callback": progress_callback,
+        "answer_callback": answer_callback,
         "current_query": question,
         "retrieval_attempt_count": 0,
         "retrieval_attempts": [],
@@ -2232,6 +2506,7 @@ async def run_langgraph_analysis(
         "skip_rewrite": False,
         "suggested_rewrite_query": "",
         "retrieval_evaluation": {},
+        "retrieval_contract": {},
         "target_document_id": "",
         "target_document_title": "",
         "answer_scope": {

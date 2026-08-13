@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from agent.agent_runtime import AgentDependencies
 from agent.langchain_tools import build_langchain_tools
 from agent.tool_payloads import run_artifact_search_payload
+from agent.tool_payloads import run_hybrid_search_payload
 
 
 @pytest.mark.asyncio
@@ -36,7 +37,9 @@ async def test_artifact_search_tool_calls_payload(monkeypatch):
             "limit": 7,
             "artifact_types": ["table"],
             "document_id": "11111111-1111-1111-1111-111111111111",
+            "document_ids": ["11111111-1111-1111-1111-111111111111"],
             "text_weight": 0.2,
+            "embedding_language": "en",
         }
     )
 
@@ -46,7 +49,34 @@ async def test_artifact_search_tool_calls_payload(monkeypatch):
     assert captured["limit"] == 7
     assert captured["artifact_types"] == ["table"]
     assert captured["document_id"] == "11111111-1111-1111-1111-111111111111"
+    assert captured["document_ids"] == ["11111111-1111-1111-1111-111111111111"]
     assert captured["text_weight"] == 0.2
+    assert captured["embedding_language"] == "en"
+
+
+@pytest.mark.asyncio
+async def test_langchain_section_tool_forwards_planner_document_scope(monkeypatch):
+    captured = {}
+
+    async def fake_run_section_search_payload(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(
+        "agent.langchain_tools.run_section_search_payload",
+        fake_run_section_search_payload,
+    )
+    deps = AgentDependencies(session_id="s-section")
+    tool = next(tool for tool in build_langchain_tools(deps) if tool.name == "section_search")
+    await tool.ainvoke(
+        {
+            "query": "rewiring",
+            "section_query": "method or algorithm",
+            "document_ids": ["target-paper"],
+        }
+    )
+
+    assert captured["document_ids"] == ["target-paper"]
 
 
 @pytest.mark.asyncio
@@ -92,3 +122,22 @@ async def test_run_artifact_search_payload_error_sets_retrieval_error(monkeypatc
 
     assert payload == []
     assert "artifact_search_failed:RuntimeError" == deps.search_preferences.get("retrieval_error")
+
+
+@pytest.mark.asyncio
+async def test_hybrid_search_payload_keeps_graph_expanded_document_scope(monkeypatch):
+    captured = {}
+
+    async def fake_hybrid_search_tool(input_data):
+        captured["document_ids"] = input_data.document_ids
+        return []
+
+    monkeypatch.setattr("agent.tool_payloads.hybrid_search_tool", fake_hybrid_search_tool)
+    deps = AgentDependencies(
+        session_id="scoped",
+        search_preferences={"selected_document_ids": ["seed-paper", "graph-neighbor"]},
+    )
+
+    await run_hybrid_search_payload(deps=deps, query="method transfer", limit=4)
+
+    assert captured["document_ids"] == ["seed-paper", "graph-neighbor"]

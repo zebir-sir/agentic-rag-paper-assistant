@@ -11,6 +11,7 @@ def test_build_ingestion_task_message_shape():
         "task_id": "task-123",
         "document_id": None,
         "file_path": "documents/ui_uploads/a/paper.pdf",
+        "fast": False,
     }
 
 

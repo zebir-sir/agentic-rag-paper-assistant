@@ -5,6 +5,7 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.models.openai import OpenAIChatModel
 import openai
 from dotenv import load_dotenv
+from .embedding_runtime import get_embedding_client_for_route, get_embedding_route
 
 load_dotenv()
 
@@ -22,26 +23,27 @@ def get_llm_model(model_choice: Optional[str] = None) -> OpenAIChatModel:
 
 
 def get_embedding_client() -> openai.AsyncOpenAI:
-    api_key = os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("OPENAI_BASE_URL")
-
-    return openai.AsyncOpenAI(
-        api_key=api_key,
-        base_url=base_url,
-    )
+    return get_embedding_client_for_route(get_embedding_route())
 
 
 def get_embedding_model() -> str:
-    return os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    return get_embedding_route().model
 
 
 def get_embedding_dimensions(model_choice: Optional[str] = None) -> Optional[int]:
+    model_name = str(model_choice or get_embedding_model() or "").strip()
+
+    # SiliconFlow's BAAI endpoints return their native 1024-dimensional vectors
+    # but reject the optional OpenAI `dimensions` parameter. Model capability
+    # takes precedence over a global compatibility setting.
+    if model_name.startswith("BAAI/"):
+        return None
+
     raw = str(os.getenv("EMBEDDING_DIMENSIONS", "") or "").strip()
     if raw:
         value = int(raw)
         return value if value > 0 else None
 
-    model_name = str(model_choice or get_embedding_model() or "").strip()
     if model_name.startswith("text-embedding-3"):
         return 1024
     if model_name.startswith("Qwen/Qwen3-Embedding-"):

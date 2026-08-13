@@ -1,125 +1,106 @@
 from agent.memory_utils import (
-    MemoryState,
-    build_context_without_compaction,
-    build_summary_update_prompt,
-    get_messages_for_next_compaction,
-    sanitize_history_messages,
-    sanitize_message_for_context,
+    SessionMemoryState,
+    build_context,
+    build_memory_update_prompt,
+    memory_eligible_messages,
+    messages_for_memory_update,
+    normalize_memory_summary,
+    should_update_memory,
 )
 
 
-def test_sanitize_message_for_context_keeps_user_and_final_assistant_content():
-    user_message = {
-        "role": "user",
-        "content": "根据上传论文总结方法贡献",
-        "metadata": {"intent_plan": {"intent": "local_paper_qa"}},
-    }
-    assistant_message = {
-        "role": "assistant",
-        "content": "这篇论文的主要方法贡献包括三个方面。",
-        "metadata": {"tools_executed": ["hybrid_search"]},
-    }
-
-    assert sanitize_message_for_context(user_message) == {
-        "role": "user",
-        "content": "根据上传论文总结方法贡献",
-    }
-    assert sanitize_message_for_context(assistant_message) == {
-        "role": "assistant",
-        "content": "这篇论文的主要方法贡献包括三个方面。",
-    }
-
-
-def test_sanitize_message_for_context_drops_debug_payload_content():
-    polluted_message = {
-        "role": "assistant",
-        "content": (
-            '{"intent_plan":{"intent":"direct_answer"},'
-            '"tools_executed":["hybrid_search"],'
-            '"raw_model_content_preview":"..."}'
-        ),
-        "metadata": {},
-    }
-    assert sanitize_message_for_context(polluted_message) is None
-
-
-def test_build_context_without_compaction_excludes_planner_debug_fields():
-    history_messages = [
-        {"role": "user", "content": "你觉得我今晚吃什么比较好"},
-        {
-            "role": "assistant",
-            "content": (
-                '{"intent_plan":{"intent":"direct_answer"},'
-                '"tools_planned":["hybrid_search"],'
-                '"tools_executed":["hybrid_search"],'
-                '"raw_model_content_preview":"..."}'
-            ),
-        },
-        {"role": "assistant", "content": "今晚可以吃点清淡又有蛋白质的，比如鸡胸肉沙拉或盖饭。"},
+def test_memory_whitelist_excludes_partial_and_debug_messages():
+    messages = [
+        {"role": "user", "content": "比较两篇论文", "metadata": {"memory_eligible": True}},
+        {"role": "assistant", "content": "最终回答", "metadata": {"memory_eligible": True}},
+        {"role": "assistant", "content": "部分输出", "metadata": {"partial_response": True}},
+        {"role": "assistant", "content": '{"tool_calls":["search"]}', "metadata": {}},
+        {"role": "system", "content": "debug", "metadata": {"memory_eligible": True}},
     ]
 
-    result = build_context_without_compaction(
-        history_messages=history_messages,
-        current_question="再给我一个偏热量低的版本",
-        memory_state=MemoryState(),
-    )
-
-    assert "你觉得我今晚吃什么比较好" in result.full_prompt
-    assert "今晚可以吃点清淡又有蛋白质的" in result.full_prompt
-    assert "intent_plan" not in result.full_prompt
-    assert "tools_planned" not in result.full_prompt
-    assert "tools_executed" not in result.full_prompt
-    assert "raw_model_content_preview" not in result.full_prompt
-    assert "hybrid_search" not in result.full_prompt
-
-
-def test_get_messages_for_next_compaction_filters_debug_only_messages():
-    history_messages = [
-        {"role": "user", "content": "用户问题"},
-        {"role": "assistant", "content": '{"tools_executed":["search_knowledge_base"]}'},
+    assert memory_eligible_messages(messages) == [
+        {"role": "user", "content": "比较两篇论文"},
         {"role": "assistant", "content": "最终回答"},
-        {"role": "user", "content": "继续追问"},
-        {"role": "assistant", "content": "继续回答"},
-        {"role": "user", "content": "第三问"},
-        {"role": "assistant", "content": "第三答"},
-        {"role": "user", "content": "第四问"},
-        {"role": "assistant", "content": "第四答"},
     ]
 
-    compact_messages = get_messages_for_next_compaction(
-        history_messages=history_messages,
-        compacted_message_count=0,
+
+def test_memory_keeps_safe_scope_metadata_only():
+    messages = [
+        {
+            "role": "user",
+            "content": "比较选中的材料",
+            "metadata": {
+                "memory_eligible": True,
+                "scope_mode": "selected_documents",
+                "scope_document_ids": ["paper-a", "paper-b"],
+                "sources": ["must-not-enter-memory"],
+            },
+        }
+    ]
+
+    assert memory_eligible_messages(messages) == [
+        {
+            "role": "user",
+            "content": "比较选中的材料",
+            "scope_mode": "selected_documents",
+            "scope_document_ids": ["paper-a", "paper-b"],
+        }
+    ]
+
+
+def test_summary_normalization_removes_unknown_fields_and_bounds_values():
+    summary = normalize_memory_summary(
+        {
+            "goal": "研究论文知识库" * 200,
+            "constraints": ["只使用本地知识库"],
+            "unknown": "debug payload",
+            "open_questions": "not-a-list",
+        }
     )
-    compact_texts = [msg["content"] for msg in compact_messages]
-    assert '{"tools_executed":["search_knowledge_base"]}' not in compact_texts
-    assert "用户问题" in compact_texts
+
+    assert summary["goal"]
+    assert len(summary["goal"]) == 600
+    assert summary["constraints"] == ["只使用本地知识库"]
+    assert summary["open_questions"] == []
+    assert "unknown" not in summary
 
 
-def test_build_summary_update_prompt_requires_constraints_and_boundary_preservation():
-    prompt = build_summary_update_prompt(
-        old_summary="当前讨论对象：Hybrid-RRT。用户约束：只看 Abstract 与 Introduction。",
-        messages_to_compact=[
-            {
-                "role": "user",
-                "content": "只基于 Abstract 和 Introduction，不要扩展到 Results 或 Conclusion，也不要联网。",
-            }
-        ],
+def test_context_uses_snapshot_and_recent_eligible_turns():
+    history = [
+        {"role": "user", "content": f"问题 {index}"}
+        for index in range(10)
+    ]
+    result = build_context(
+        history_messages=history,
+        current_question="当前问题",
+        memory_state=SessionMemoryState(
+            version=2,
+            covered_message_count=8,
+            summary={"goal": "完成方法比较", "constraints": ["中文回答"]},
+        ),
     )
-    assert "用户约束" in prompt
-    assert "章节范围" in prompt
-    assert "禁止范围" in prompt
-    assert "来源限制" in prompt
-    assert "保留仍然有效的用户约束" in prompt
-    assert "若新消息明确改变讨论对象或约束，以新消息为准" in prompt
-    assert "简体中文" in prompt
+
+    assert result.compression_used is True
+    assert "Structured conversation memory" in result.full_prompt
+    assert "问题 1" not in result.full_prompt
+    assert "问题 9" in result.full_prompt
+    assert "当前问题" in result.full_prompt
 
 
-def test_build_summary_update_prompt_forbids_debug_payload_and_tool_metadata():
-    prompt = build_summary_update_prompt(
-        old_summary="",
-        messages_to_compact=[{"role": "assistant", "content": "继续分析方法流程"}],
+def test_update_policy_uses_new_eligible_messages_and_trigger():
+    history = [{"role": "user", "content": f"m{index}"} for index in range(8)]
+    state = SessionMemoryState(covered_message_count=0)
+
+    assert should_update_memory(history, state, "new question") is True
+    assert messages_for_memory_update(history, 6) == history[6:]
+
+
+def test_memory_update_prompt_forbids_retrieval_and_paper_facts():
+    prompt = build_memory_update_prompt(
+        {"goal": "比较方法"},
+        [{"role": "assistant", "content": "最终回答"}],
     )
-    assert "不要把任何 debug payload" in prompt
-    assert "raw_model_content_preview" in prompt
-    assert "tools_executed" in prompt
-    assert "intent_plan" in prompt
+
+    assert "Return JSON only" in prompt
+    assert "Never store paper claims" in prompt
+    assert "tool calls" in prompt

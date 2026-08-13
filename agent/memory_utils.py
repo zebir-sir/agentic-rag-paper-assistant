@@ -1,257 +1,192 @@
+"""Scoped, structured conversation memory built only from approved final turns."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import os
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-TOKEN_LIMIT = 16000
-RECENT_MESSAGE_COUNT = 6
-PLANNER_DEBUG_METADATA_KEYS = {
-    "intent_plan",
-    "planned_retrieval_steps",
-    "tools_planned",
-    "tools_executed",
-    "filtered_unavailable_tools",
-    "planner_capabilities",
-    "available_tools",
-    "raw_model_content_preview",
-    "fallback_reason",
-    "fallback_decision",
-    "retrieval_skipped_by_planner",
-}
-_DEBUG_CONTENT_MARKERS = {
-    "intent_plan",
-    "planned_retrieval_steps",
-    "tools_planned",
-    "tools_executed",
-    "filtered_unavailable_tools",
-    "planner_capabilities",
-    "available_tools",
-    "raw_model_content_preview",
-    "fallback_reason",
-    "fallback_decision",
-    "retrieval_skipped_by_planner",
-    "tool_call_id",
-    "chunk_id",
-    "document_title",
-    "document_source",
-}
-_DEBUG_TOOL_MARKERS = {
-    "search_knowledge_base",
-    "hybrid_search",
-    "artifact_search",
-    "vector_search",
-    "section_search",
-    "openalex_search",
-    "web_search",
-}
+
+MEMORY_CONTEXT_BUDGET_TOKENS = int(os.getenv("MEMORY_CONTEXT_BUDGET_TOKENS", "28000"))
+MEMORY_COMPACTION_TRIGGER_TOKENS = int(os.getenv("MEMORY_COMPACTION_TRIGGER_TOKENS", "30000"))
+RECENT_MESSAGE_COUNT = int(os.getenv("MEMORY_RECENT_TURNS", "8"))
+MEMORY_UPDATE_TURN_INTERVAL = int(os.getenv("MEMORY_UPDATE_TURN_INTERVAL", "8"))
+MEMORY_SUMMARY_KEYS = (
+    "goal",
+    "scope_document_ids",
+    "constraints",
+    "confirmed_decisions",
+    "open_questions",
+    "uncertainties",
+)
 
 
 @dataclass
-class MemoryState:
-    latest_summary: str = ""
-    compression_count: int = 0
-    compacted_message_count: int = 0
+class SessionMemoryState:
+    version: int = 0
+    covered_message_count: int = 0
+    summary: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class ContextBuildResult:
     full_prompt: str
     compression_used: bool
-    summary_updated: bool
-    latest_summary: str
-    compression_count: int
-    compacted_message_count: int
+    memory_updated: bool
+    memory_state: SessionMemoryState
 
 
 def estimate_tokens(text: str) -> int:
-    """Use a stable approximation to estimate token count without extra deps."""
-    if not text:
-        return 0
-    return max(1, len(text) // 4)
+    return max(1, len(text) // 4) if text else 0
 
 
-def _looks_like_debug_payload(text: str) -> bool:
-    content = str(text or "").strip()
-    if not content:
-        return False
-    lowered = content.lower()
-    if any(marker in lowered for marker in _DEBUG_CONTENT_MARKERS):
-        return True
-    json_like = lowered.startswith("{") or lowered.startswith("[") or "\n{" in lowered or "\n[" in lowered
-    if json_like and any(marker in lowered for marker in _DEBUG_TOOL_MARKERS):
-        return True
-    return False
+def empty_memory_summary() -> Dict[str, Any]:
+    return {
+        "goal": "",
+        "scope_document_ids": [],
+        "constraints": [],
+        "confirmed_decisions": [],
+        "open_questions": [],
+        "uncertainties": [],
+    }
 
 
-def sanitize_message_for_context(message: Dict[str, Any]) -> Optional[Dict[str, str]]:
+def normalize_memory_summary(value: Any) -> Dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    result = empty_memory_summary()
+    result["goal"] = str(source.get("goal") or "").strip()[:600]
+    result["scope_document_ids"] = [str(item) for item in source.get("scope_document_ids", []) if str(item).strip()][:30]
+    for key in ("constraints", "confirmed_decisions", "open_questions", "uncertainties"):
+        raw_items = source.get(key, [])
+        if not isinstance(raw_items, list):
+            raw_items = []
+        result[key] = [" ".join(str(item).split())[:360] for item in raw_items if str(item).strip()][:12]
+    return result
+
+
+def normalize_memory_state(snapshot: Optional[Dict[str, Any]]) -> SessionMemoryState:
+    value = snapshot or {}
+    return SessionMemoryState(
+        version=max(0, int(value.get("version") or 0)),
+        covered_message_count=max(0, int(value.get("covered_message_count") or 0)),
+        summary=normalize_memory_summary(value.get("summary")),
+    )
+
+
+def is_memory_eligible_message(message: Dict[str, Any]) -> bool:
     role = str(message.get("role") or "").strip().lower()
-    if role not in {"user", "assistant"}:
-        return None
-
     content = str(message.get("content") or "").strip()
-    if not content:
-        return None
-    if _looks_like_debug_payload(content):
-        return None
-    return {"role": role, "content": content}
+    metadata = message.get("metadata") or {}
+    return role in {"user", "assistant"} and bool(metadata.get("memory_eligible")) and bool(content)
 
 
-def sanitize_history_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-    sanitized: List[Dict[str, str]] = []
+def memory_eligible_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    eligible: List[Dict[str, Any]] = []
     for message in messages or []:
-        cleaned = sanitize_message_for_context(message)
-        if cleaned is not None:
-            sanitized.append(cleaned)
-    return sanitized
+        if not is_memory_eligible_message(message):
+            continue
+        item: Dict[str, Any] = {
+            "role": str(message["role"]),
+            "content": str(message["content"]).strip(),
+        }
+        metadata = message.get("metadata") or {}
+        if item["role"] == "user":
+            scope_ids = metadata.get("scope_document_ids") or metadata.get("selected_document_ids") or []
+            if isinstance(scope_ids, list):
+                normalized_scope_ids = [str(value) for value in scope_ids if str(value).strip()][:30]
+                if normalized_scope_ids:
+                    item["scope_document_ids"] = normalized_scope_ids
+            scope_mode = str(metadata.get("scope_mode") or "").strip()
+            if scope_mode:
+                item["scope_mode"] = scope_mode
+        eligible.append(item)
+    return eligible
 
 
-def _messages_to_text(messages: List[Dict[str, str]]) -> str:
-    sanitized = sanitize_history_messages(messages)
-    return "\n".join(
-        f"{msg.get('role', 'unknown')}: {msg.get('content', '')}" for msg in sanitized
-    )
+def _messages_to_text(messages: List[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for item in messages:
+        scope = ""
+        if item.get("role") == "user" and item.get("scope_mode"):
+            scope = f" [scope_mode={item['scope_mode']}; scope_document_ids={item.get('scope_document_ids', [])}]"
+        lines.append(f"{item['role']}{scope}: {item['content']}")
+    return "\n".join(lines)
 
 
-def _build_full_history_prompt(
-    history_messages: List[Dict[str, str]],
-    current_question: str
+def build_memory_update_prompt(
+    previous_summary: Dict[str, Any],
+    turns: List[Dict[str, str]],
 ) -> str:
-    sanitized_history = sanitize_history_messages(history_messages)
-    if not sanitized_history:
-        return current_question
-    context_str = _messages_to_text(sanitized_history)
-    return f"Previous conversation:\n{context_str}\n\nCurrent question: {current_question}"
-
-
-def _build_summary_prompt(
-    latest_summary: str,
-    recent_messages: List[Dict[str, str]],
-    current_question: str
-) -> str:
-    sanitized_recent = sanitize_history_messages(recent_messages)
-    parts: List[str] = []
-    if latest_summary.strip():
-        parts.append(f"Conversation summary:\n{latest_summary.strip()}")
-    if sanitized_recent:
-        parts.append(f"Recent conversation:\n{_messages_to_text(sanitized_recent)}")
-    parts.append(f"Current question: {current_question}")
-    return "\n\n".join(parts)
-
-
-def _estimate_context_tokens(
-    system_prompt: str,
-    history_messages: List[Dict[str, str]],
-    current_question: str,
-    latest_summary: str = "",
-    use_summary_context: bool = False
-) -> int:
-    if use_summary_context:
-        recent_messages = history_messages[-RECENT_MESSAGE_COUNT:]
-        body = _build_summary_prompt(latest_summary, recent_messages, current_question)
-    else:
-        body = _build_full_history_prompt(history_messages, current_question)
-    return estimate_tokens(system_prompt) + estimate_tokens(body)
-
-
-def should_trigger_compression(
-    system_prompt: str,
-    history_messages: List[Dict[str, str]],
-    current_question: str,
-    latest_summary: str = "",
-    token_limit: int = TOKEN_LIMIT
-) -> bool:
-    sanitized_history = sanitize_history_messages(history_messages)
-    use_summary_context = bool(latest_summary.strip())
-    total_tokens = _estimate_context_tokens(
-        system_prompt=system_prompt,
-        history_messages=sanitized_history,
-        current_question=current_question,
-        latest_summary=latest_summary,
-        use_summary_context=use_summary_context,
-    )
-    return total_tokens > token_limit
-
-
-def build_summary_update_prompt(
-    old_summary: str,
-    messages_to_compact: List[Dict[str, str]]
-) -> str:
-    compact_text = _messages_to_text(messages_to_compact)
-    common_instruction = (
-        "你在执行内部会话记忆压缩任务。不要调用任何工具，不要检索文档，只根据我提供的内容生成更新后的滚动摘要。\n"
-        "请输出简体中文，短而高信息密度，建议 220~320 字。\n"
-        "必须按以下小节输出（每节 1~2 句）：\n"
-        "1) 当前讨论对象：论文标题/文档名/用户指定对象；没有则写“未明确”。\n"
-        "2) 用户约束：章节范围、禁止范围、来源限制（如只基于本地知识库/不要联网/只用 OpenAlex）、回答风格要求。\n"
-        "3) 已确认信息：仅记录对话中已明确出现的信息，不新增事实。\n"
-        "4) 用户关注点：研究关注方向、后续分析目标、偏好的比较维度。\n"
-        "5) 待继续问题：用户可能继续追问的关键问题。\n"
-        "6) 不确定或缺失信息：证据不足/未检索到/尚未确认的点。\n\n"
-        "合并规则：\n"
-        "- 若已有旧摘要，保留仍然有效的用户约束与上下文，不要被新消息无故覆盖。\n"
-        "- 若新消息明确改变讨论对象或约束，以新消息为准。\n\n"
-        "严格禁止：\n"
-        "- 不要编造论文结论、实验数字、作者、年份、DOI。\n"
-        "- 不要把任何 debug payload、tool metadata、raw_model_content_preview、tools_executed、intent_plan、planner/runtime 调试字段写入摘要。\n"
-    )
-    if old_summary.strip():
-        return (
-            f"{common_instruction}\n"
-            f"旧摘要：\n{old_summary.strip()}\n\n"
-            f"新增待压缩历史消息：\n{compact_text}\n\n"
-            "请返回更新后的 latest_summary："
-        )
     return (
-        f"{common_instruction}\n"
-        f"待压缩历史消息：\n{compact_text}\n\n"
-        "请返回 latest_summary："
+        "Update a structured research conversation memory. Return JSON only. "
+        "Schema: {goal:string, scope_document_ids:string[], constraints:string[], "
+        "confirmed_decisions:string[], open_questions:string[], uncertainties:string[]}. "
+        "Only keep durable conversation coordination: user goal, selected document IDs, "
+        "explicit constraints, user-confirmed decisions, follow-up questions, and uncertainty boundaries. "
+        "Never store paper claims, numerical results, citations, source snippets, retrieval results, "
+        "tool calls, model reasoning, debug data, errors, or assistant guesses as memory. "
+        "When a new explicit constraint replaces an old one, replace it. Omit empty or stale items.\n\n"
+        f"Previous structured memory:\n{json.dumps(normalize_memory_summary(previous_summary), ensure_ascii=False)}\n\n"
+        f"Eligible completed turns:\n{_messages_to_text(turns)}"
     )
 
 
-def get_messages_for_next_compaction(
+def should_update_memory(
     history_messages: List[Dict[str, str]],
-    compacted_message_count: int
+    memory_state: SessionMemoryState,
+    current_question: str,
+) -> bool:
+    unprocessed = len(history_messages) - memory_state.covered_message_count
+    projected = _messages_to_text(history_messages + [{"role": "user", "content": current_question}])
+    return unprocessed >= MEMORY_UPDATE_TURN_INTERVAL or estimate_tokens(projected) >= MEMORY_COMPACTION_TRIGGER_TOKENS
+
+
+def messages_for_memory_update(
+    history_messages: List[Dict[str, str]],
+    covered_message_count: int,
 ) -> List[Dict[str, str]]:
-    sanitized_history = sanitize_history_messages(history_messages)
-    compactable_end = max(0, len(sanitized_history) - RECENT_MESSAGE_COUNT)
-    start = max(0, compacted_message_count)
-    if start >= compactable_end:
-        return []
-    return sanitized_history[start:compactable_end]
+    return history_messages[max(0, covered_message_count) :]
 
 
-def build_context_without_compaction(
+def build_context(
     history_messages: List[Dict[str, str]],
     current_question: str,
-    memory_state: MemoryState
+    memory_state: SessionMemoryState,
 ) -> ContextBuildResult:
-    sanitized_history = sanitize_history_messages(history_messages)
-    if memory_state.latest_summary.strip():
-        recent_messages = sanitized_history[-RECENT_MESSAGE_COUNT:]
-        prompt = _build_summary_prompt(memory_state.latest_summary, recent_messages, current_question)
-        return ContextBuildResult(
-            full_prompt=prompt,
-            compression_used=True,
-            summary_updated=False,
-            latest_summary=memory_state.latest_summary,
-            compression_count=memory_state.compression_count,
-            compacted_message_count=memory_state.compacted_message_count,
-        )
-
+    recent = history_messages[-RECENT_MESSAGE_COUNT:]
+    blocks: List[str] = []
+    use_snapshot = bool(memory_state.version and any(memory_state.summary.values()))
+    if use_snapshot:
+        blocks.append(f"Structured conversation memory:\n{json.dumps(memory_state.summary, ensure_ascii=False)}")
+    if recent:
+        blocks.append(f"Recent eligible conversation:\n{_messages_to_text(recent)}")
+    blocks.append(f"Current question: {current_question}")
+    prompt = "\n\n".join(blocks)
+    if estimate_tokens(prompt) > MEMORY_CONTEXT_BUDGET_TOKENS:
+        bounded_recent: List[Dict[str, Any]] = []
+        for item in reversed(recent):
+            candidate = [item] + bounded_recent
+            candidate_blocks = []
+            if use_snapshot:
+                candidate_blocks.append(
+                    f"Structured conversation memory:\n{json.dumps(memory_state.summary, ensure_ascii=False)}"
+                )
+            candidate_blocks.append(f"Recent eligible conversation:\n{_messages_to_text(candidate)}")
+            candidate_blocks.append(f"Current question: {current_question}")
+            if estimate_tokens("\n\n".join(candidate_blocks)) > MEMORY_CONTEXT_BUDGET_TOKENS:
+                break
+            bounded_recent = candidate
+        blocks = []
+        if use_snapshot:
+            blocks.append(f"Structured conversation memory:\n{json.dumps(memory_state.summary, ensure_ascii=False)}")
+        if bounded_recent:
+            blocks.append(f"Recent eligible conversation:\n{_messages_to_text(bounded_recent)}")
+        blocks.append(f"Current question: {current_question}")
+        prompt = "\n\n".join(blocks)
     return ContextBuildResult(
-        full_prompt=_build_full_history_prompt(sanitized_history, current_question),
-        compression_used=False,
-        summary_updated=False,
-        latest_summary=memory_state.latest_summary,
-        compression_count=memory_state.compression_count,
-        compacted_message_count=memory_state.compacted_message_count,
-    )
-
-
-def normalize_memory_state(metadata: Optional[Dict[str, Any]]) -> MemoryState:
-    data = metadata or {}
-    return MemoryState(
-        latest_summary=str(data.get("latest_summary") or ""),
-        compression_count=int(data.get("compression_count") or 0),
-        compacted_message_count=int(data.get("compacted_message_count") or 0),
+        full_prompt=prompt,
+        compression_used=use_snapshot,
+        memory_updated=False,
+        memory_state=memory_state,
     )

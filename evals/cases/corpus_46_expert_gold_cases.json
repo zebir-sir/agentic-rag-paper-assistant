@@ -1,0 +1,118 @@
+{
+  "metadata": {
+    "name": "RRT 46-paper expert gold retrieval set",
+    "version": "1.0",
+    "annotation_protocol": "single_expert_constructed",
+    "scope": "Retrieval relevance for the local 46-paper corpus. Each label specifies a primary source paper and evidence cues; it is not an external benchmark or multi-annotator study."
+  },
+  "cases": [
+    {
+      "id": "gold_01_informed_rrt",
+      "question": "Informed RRT* 为什么要直接在可改进解的椭球区域内采样？",
+      "expected_document_ids": ["04a7a184-6491-4348-82d4-eb51451df671"],
+      "expected_document_title": "Informed RRT*: Optimal Sampling-based Path Planning Focused via Direct Sampling of an Admissible Ellipsoidal Heuristic",
+      "expected_section_keywords": ["introduction", "informed rrt"],
+      "expected_content_keywords": ["ellipsoid", "sample", "improve"],
+      "rationale": "该论文的摘要和引言直接给出可改进路径长度解的椭球子集及直接采样动机。"
+    },
+    {
+      "id": "gold_02_bitstar",
+      "question": "BIT* 如何将批量采样与启发式搜索结合起来？",
+      "expected_document_ids": ["0554bc89-39c6-4b22-8455-e73c3f6d428e"],
+      "expected_document_title": "Batch Informed Trees (BIT*)",
+      "expected_section_keywords": ["introduction", "algorithm"],
+      "expected_content_keywords": ["batch", "heuristic", "graph"],
+      "rationale": "BIT* 的核心定义是对隐式随机几何图进行启发式引导的批量搜索。"
+    },
+    {
+      "id": "gold_03_fmtstar",
+      "question": "FMT* 与逐步扩展树的采样规划方法相比，关键搜索机制是什么？",
+      "expected_document_ids": ["bb1dea0d-1739-4aa8-a02d-c26ad2387f7e"],
+      "expected_document_title": "Fast Marching Tree",
+      "expected_section_keywords": ["introduction", "algorithm"],
+      "expected_content_keywords": ["fast", "marching", "tree"],
+      "rationale": "FMT* 论文将快速行进思想与采样点连接机制作为方法核心。"
+    },
+    {
+      "id": "gold_04_rrt_smart",
+      "question": "RRT*-Smart 用什么机制提升初始解之后的收敛速度？",
+      "expected_document_ids": ["27e35ab6-347f-4b44-a967-7a57446acb00"],
+      "expected_document_title": "RRT*-Smart",
+      "expected_section_keywords": ["algorithm", "smart"],
+      "expected_content_keywords": ["convergence", "beacon", "optimization"],
+      "rationale": "RRT*-Smart 专门研究在获得可行解后加速收敛的改进机制。"
+    },
+    {
+      "id": "gold_05_multi_agent",
+      "question": "多智能体 RRT* 如何在联合状态空间中避免智能体轨迹冲突？",
+      "expected_document_ids": ["e9e9bb18-9304-4008-9b06-4a1d3acc13ea"],
+      "expected_document_title": "Multi-agent RRT*",
+      "expected_section_keywords": ["problem", "algorithm"],
+      "expected_content_keywords": ["joint", "agent", "collision"],
+      "rationale": "MA-RRT* 的问题定义与算法均针对联合状态空间中的无碰撞协同路径。"
+    },
+    {
+      "id": "gold_06_space_time",
+      "question": "ST-RRT* 为什么要在时空中进行双向规划？",
+      "expected_document_ids": ["45d12b9f-fa8d-4002-8ff9-bf287f8be49b"],
+      "expected_document_title": "ST-RRT*",
+      "expected_section_keywords": ["introduction", "algorithm"],
+      "expected_content_keywords": ["space", "time", "bidirectional"],
+      "rationale": "ST-RRT* 明确以时空状态空间和双向规划为方法定义。"
+    },
+    {
+      "id": "gold_07_assisting_metric",
+      "question": "AM-RRT* 中的辅助度量如何帮助信息采样规划？",
+      "expected_document_ids": ["ee922104-011f-4517-adde-9dce33b49b69"],
+      "expected_document_title": "AM-RRT*",
+      "expected_section_keywords": ["method", "metric"],
+      "expected_content_keywords": ["assisting", "metric", "sampling"],
+      "rationale": "AM-RRT* 论文以 assisting metric 作为其采样引导机制。"
+    },
+    {
+      "id": "gold_08_uncertainty",
+      "question": "在模型不确定性下，Risk-Averse RRT* 如何同时考虑路径规划和跟踪安全？",
+      "expected_document_ids": ["fca1ed7f-6e30-41e7-aa5f-c10d1edc1a61"],
+      "expected_document_title": "Risk-Averse RRT*",
+      "expected_section_keywords": ["introduction", "method"],
+      "expected_content_keywords": ["risk", "uncertainty", "tracking"],
+      "rationale": "该论文题目和方法范围直接覆盖风险规避、不确定性、转向与跟踪控制。"
+    },
+    {
+      "id": "gold_09_colregs",
+      "question": "COLREGs-Informed RRT* 如何把海上避碰规则融入航行器路径规划？",
+      "expected_document_ids": ["ef3dad39-b268-4548-a194-2ac5df6ac050"],
+      "expected_document_title": "COLREGs-Informed RRT*",
+      "expected_section_keywords": ["introduction", "method"],
+      "expected_content_keywords": ["colreg", "marine", "collision"],
+      "rationale": "该论文的研究对象是海上航行器，方法目标是 COLREGs 约束下的碰撞避免。"
+    },
+    {
+      "id": "gold_10_neural",
+      "question": "Neural Informed RRT* 如何使用点云状态表示来引导采样？",
+      "expected_document_ids": ["e9dc5c5a-6ccd-4021-8dc5-4f0625ea59b1"],
+      "expected_document_title": "Neural Informed RRT*",
+      "expected_section_keywords": ["introduction", "method"],
+      "expected_content_keywords": ["neural", "point", "cloud"],
+      "rationale": "论文标题直接限定了神经引导、点云状态表示与信息采样约束。"
+    },
+    {
+      "id": "gold_11_rabit",
+      "question": "RABIT* 怎样将局部信息整合进最优路径规划？",
+      "expected_document_ids": ["dabbb955-c30a-4ca4-9fc9-12c258074e38"],
+      "expected_document_title": "RABIT*",
+      "expected_section_keywords": ["introduction", "method"],
+      "expected_content_keywords": ["local", "information", "optimal"],
+      "rationale": "RABIT* 的框架目标就是向最优采样规划中融入局部信息。"
+    },
+    {
+      "id": "gold_12_usv_environment",
+      "question": "海面风和洋流会如何影响无人水面艇的运动规划建模？",
+      "expected_document_ids": ["5dd3ecf5-3774-48e4-a738-f61bc3899207"],
+      "expected_document_title": "Motion Planning for an Unmanned Surface Vehicle with Wind and Current Effects",
+      "expected_section_keywords": ["introduction", "model"],
+      "expected_content_keywords": ["wind", "current", "surface"],
+      "rationale": "该论文直接研究风、洋流效应下的无人水面艇运动规划。"
+    }
+  ]
+}

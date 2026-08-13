@@ -66,7 +66,13 @@ def _collect_evidence_hit(
     score = hit.get("score")
     metadata = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
     metadata = {"source_type": "local", **metadata}
-    source_type = "web" if str(metadata.get("source_type", "local")).lower() == "web" else "local"
+    metadata_source_type = str(metadata.get("source_type") or "").lower()
+    if metadata_source_type == "web":
+        source_type = "web"
+    elif metadata_source_type in {"local_artifact", "artifact"} or str(metadata.get("content_type") or "").lower() == "artifact":
+        source_type = "artifact"
+    else:
+        source_type = "local"
 
     key = _build_source_key(
         source_type=source_type,

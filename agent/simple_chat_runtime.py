@@ -37,6 +37,39 @@ _COMPLEXITY_CUES = (
     "推导",
 )
 
+_CONVERSATION_CUES = (
+    "你好",
+    "嗨",
+    "hi",
+    "hello",
+    "在吗",
+    "谢谢",
+    "辛苦了",
+    "你觉得",
+    "你认为",
+    "你觉得我",
+    "帅吗",
+    "漂亮吗",
+    "厉害吗",
+)
+
+_EVIDENCE_DEPENDENT_CUES = (
+    "论文",
+    "知识库",
+    "文档",
+    "pdf",
+    "图",
+    "表",
+    "算法",
+    "实验",
+    "检索",
+    "搜索",
+    "网页",
+    "新闻",
+    "最新",
+    "openalex",
+)
+
 _SECTION_CUES = {
     "abstract": "Abstract",
     "摘要": "Abstract",
@@ -100,6 +133,17 @@ def _normalize_text(text: str) -> str:
     return " ".join(str(text or "").split()).strip()
 
 
+def _is_lightweight_conversation(message: str) -> bool:
+    """Keep greetings and social chat out of the evidence-oriented workflow."""
+    normalized = _normalize_text(message)
+    if not normalized or len(normalized) > 36:
+        return False
+    lowered = normalized.lower()
+    if any(cue in lowered for cue in _EVIDENCE_DEPENDENT_CUES):
+        return False
+    return any(cue in lowered for cue in _CONVERSATION_CUES)
+
+
 def _extract_message_text(response: Any) -> str:
     content = getattr(response, "content", response)
     if isinstance(content, str):
@@ -146,6 +190,13 @@ def choose_simple_chat_strategy(
     use_web_search: bool,
 ) -> SimpleChatDecision:
     normalized_message = _normalize_text(message)
+    if _is_lightweight_conversation(normalized_message):
+        return SimpleChatDecision(
+            enabled=True,
+            mode="conversation",
+            query=normalized_message,
+            reason="lightweight_conversation",
+        )
     if not is_local_question:
         return SimpleChatDecision(enabled=False, reason="not_local_question")
     if use_react:
@@ -232,6 +283,36 @@ async def run_simple_chat_runtime(
 ) -> Optional[SimpleChatResult]:
     if not decision.enabled:
         return None
+
+    if decision.mode == "conversation":
+        model = get_simple_chat_model()
+        response = await model.ainvoke(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是 PaperWeave，一个自然、友好的研究助手。"
+                        "这是一句不需要论文、网页或事实核验的日常对话。"
+                        "直接自然回应，不解释系统、检索、模型或工作流；不要编造事实。"
+                    ),
+                },
+                {"role": "user", "content": user_message},
+            ]
+        )
+        message = _extract_message_text(response)
+        if not message or is_degenerate_answer(message):
+            return None
+        return SimpleChatResult(
+            message=message,
+            sources=[],
+            tools_used=[],
+            metadata={
+                "simple_chat_used": True,
+                "simple_chat_mode": "conversation",
+                "simple_chat_reason": decision.reason,
+                "simple_chat_result_count": 0,
+            },
+        )
 
     if decision.mode == "artifact":
         await run_artifact_search_payload(

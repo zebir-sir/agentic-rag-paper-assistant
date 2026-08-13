@@ -1,5 +1,6 @@
 import pytest
 
+from agent.tools import _expand_section_queries
 from agent.intent_planner import (
     IntentPlan,
     PlannerCapabilities,
@@ -8,6 +9,10 @@ from agent.intent_planner import (
     build_intent_planner_prompt,
     build_retry_intent_planner_prompt,
     infer_artifact_evidence_need,
+    infer_supporting_section_need,
+    infer_direct_answer_eligibility,
+    infer_general_web_evidence_need,
+    infer_paper_graph_need,
     normalize_intent_plan,
     plan_user_intent,
     plan_user_intent_debug,
@@ -255,6 +260,28 @@ def test_build_fallback_intent_plan_uses_external_when_available():
     assert plan.retrieval_steps[0].tool in {"openalex_search", "web_search"}
 
 
+@pytest.mark.asyncio
+async def test_explicit_openalex_request_is_planned_not_short_circuited():
+    class FakeModel:
+        async def ainvoke(self, _prompt: str):
+            return {
+                "intent": "direct_answer",
+                "needs_retrieval": False,
+                "retrieval_steps": [],
+                "direct_answer_allowed": True,
+            }
+
+    plan = await plan_user_intent(
+        "Use OpenAlex to find papers about single-cell spatial transcriptomics",
+        model=FakeModel(),
+        capabilities=PlannerCapabilities(openalex_search_enabled=True),
+    )
+
+    assert plan.intent == "external_paper_discovery"
+    assert [step.tool for step in plan.retrieval_steps] == ["openalex_search"]
+    assert "single-cell spatial transcriptomics" in plan.retrieval_steps[0].query
+
+
 def test_planner_prompt_is_generic_and_budgeted():
     prompt = build_intent_planner_prompt("test question")
     assert "at most 2 tools" in prompt.lower() or "max" in prompt.lower()
@@ -265,6 +292,11 @@ def test_planner_prompt_is_generic_and_budgeted():
     assert "directly relevant to the user question" in prompt.lower()
     assert "do not enumerate all artifacts by default" in prompt.lower()
     assert "prefer hybrid_search or section_search" in prompt.lower()
+    assert "person's life/death/status" in prompt.lower()
+    assert "even if the user does not explicitly say" in prompt.lower()
+    assert "conservative allowlist" in prompt.lower()
+    assert "writing transformation" in prompt.lower()
+    assert "do not choose direct_answer" in prompt.lower()
     for banned in ["HA-RRT", "HMA-RRT", "Table 4", "Fig. 6", "吃什么", "25岁", "老不老"]:
         assert banned not in prompt
 
@@ -297,6 +329,234 @@ def test_infer_artifact_evidence_need_is_narrow_and_not_default_all():
     inferred = infer_artifact_evidence_need("请根据上传论文中的指标对比和消融结果解释性能差异")
     assert inferred["needs_artifact"] is True
     assert inferred["artifact_types"] == ["table"]
+
+
+def test_algorithm_evidence_cues_include_descriptions_and_rewiring_without_overlapping_figures():
+    inferred = infer_artifact_evidence_need("解释该论文的算法描述中 rewiring 重连步骤如何改善路径代价")
+    assert inferred["needs_artifact"] is True
+    assert inferred["artifact_types"] == ["algorithm"]
+
+    context = infer_supporting_section_need("解释该论文的算法描述中 rewiring 重连步骤如何改善路径代价")
+    assert context == {"needed": "method_context", "section_query": "method or algorithm"}
+
+
+def test_explicit_named_paper_artifact_request_plans_typed_evidence_and_context():
+    plan = normalize_intent_plan(
+        {
+            "question": "结合《某篇论文》的算法描述，解释重连步骤为什么有效，并优先给出伪代码证据。",
+            "intent": "local_paper_qa",
+            "needs_retrieval": True,
+            "retrieval_steps": [{"tool": "hybrid_search", "query": "ignored"}],
+        }
+    )
+    assert plan.intent == "local_artifact_qa"
+    assert [step.tool for step in plan.retrieval_steps] == ["artifact_search", "section_search"]
+    assert plan.retrieval_steps[0].artifact_types == ["algorithm"]
+    assert plan.retrieval_steps[1].section_query == "method or algorithm"
+    assert _req(plan)["required_source_types"] == ["local_artifact", "local_section"]
+
+
+def test_infer_paper_graph_need_only_for_cross_paper_relationship_queries():
+    assert infer_paper_graph_need("请结合相关论文分析该方法可以迁移到哪些场景")["use_paper_graph"] is True
+    assert infer_paper_graph_need("请说明这篇论文第 3 节的实验设置")["use_paper_graph"] is False
+
+
+def test_explicit_no_retrieval_chinese_explanation_stays_direct_answer():
+    plan = normalize_intent_plan(
+        {
+            "question": "用通俗语言解释什么是采样偏置，不引用本地论文或外部网页。",
+            "intent": "unclear",
+            "needs_retrieval": True,
+            "retrieval_steps": [{"tool": "hybrid_search", "query": "sampling bias"}],
+        }
+    )
+    assert plan.intent == "direct_answer"
+    assert plan.needs_retrieval is False
+    assert plan.retrieval_steps == []
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_direction", "expected_relations"),
+    [
+        ("这篇方法基于哪些基础工作？", "outgoing", ["method_lineage", "cites", "semantic_similarity"]),
+        ("哪些后续论文扩展或改进了这篇方法？", "incoming", ["method_lineage", "cites", "semantic_similarity"]),
+        ("这篇论文引用了哪些工作？", "both", ["cites", "semantic_similarity"]),
+    ],
+)
+def test_infer_paper_graph_need_selects_relation_types_and_direction(question, expected_direction, expected_relations):
+    inferred = infer_paper_graph_need(question)
+    assert inferred["use_paper_graph"] is True
+    assert inferred["direction"] == expected_direction
+    assert inferred["relation_types"] == expected_relations
+
+
+def test_normalize_plan_keeps_model_graph_decision_and_bounds_neighbor_limit():
+    plan = normalize_intent_plan(
+        {
+            "intent": "multi_paper_compare",
+            "needs_retrieval": True,
+            "retrieval_steps": [{"tool": "hybrid_search", "query": "跨论文比较方法", "limit": 6}],
+            "max_tools": 1,
+            "use_paper_graph": True,
+            "graph_usage_reason": "cross_paper_comparison",
+            "graph_relation_types": ["cites", "invalid", "method_lineage"],
+            "graph_direction": "incoming",
+            "graph_neighbor_limit": 99,
+        }
+    )
+    assert plan.use_paper_graph is True
+    assert plan.graph_usage_reason == "cross_paper_comparison"
+    assert plan.graph_relation_types == ["cites", "method_lineage"]
+    assert plan.graph_direction == "incoming"
+    assert plan.graph_neighbor_limit == 12
+
+
+def test_direct_answer_plan_cannot_enable_paper_graph():
+    plan = normalize_intent_plan(
+        {
+            "intent": "direct_answer",
+            "needs_retrieval": False,
+            "retrieval_steps": [],
+            "use_paper_graph": True,
+            "graph_usage_reason": "should_be_ignored",
+        }
+    )
+    assert plan.use_paper_graph is False
+    assert plan.graph_usage_reason == ""
+    assert plan.graph_relation_types == []
+    assert plan.graph_direction == "both"
+
+
+def test_volatile_real_world_fact_requires_web_without_explicit_search_cue():
+    need = infer_general_web_evidence_need("张雪峰还活着吗")
+    assert need["needs_web"] is True
+
+    caps = PlannerCapabilities(web_search_enabled=True, direct_answer_enabled=True)
+    plan = normalize_intent_plan(
+        {
+            "question": "张雪峰还活着吗",
+            "intent": "direct_answer",
+            "needs_retrieval": False,
+            "retrieval_steps": [],
+            "direct_answer_allowed": True,
+        },
+        capabilities=caps,
+    )
+    assert plan.intent == "web_information"
+    assert plan.needs_retrieval is True
+    assert plan.direct_answer_allowed is False
+    assert [step.tool for step in plan.retrieval_steps] == ["web_search"]
+    assert "general_web" in _req(plan)["required_source_types"]
+
+
+@pytest.mark.asyncio
+async def test_model_direct_answer_for_volatile_fact_is_corrected_to_web_plan():
+    class FakeModel:
+        async def ainvoke(self, _prompt: str):
+            return {
+                "intent": "direct_answer",
+                "needs_retrieval": False,
+                "retrieval_steps": [],
+                "direct_answer_allowed": True,
+            }
+
+    plan = await plan_user_intent(
+        "张雪峰还活着吗",
+        model=FakeModel(),
+        capabilities=PlannerCapabilities(web_search_enabled=True, direct_answer_enabled=True),
+    )
+    assert plan.intent == "web_information"
+    assert plan.needs_retrieval is True
+    assert [step.tool for step in plan.retrieval_steps] == ["web_search"]
+
+
+def test_volatile_real_world_fact_discloses_when_web_is_unavailable():
+    plan = normalize_intent_plan(
+        {
+            "question": "张雪峰还活着吗",
+            "intent": "direct_answer",
+            "needs_retrieval": False,
+            "retrieval_steps": [],
+            "direct_answer_allowed": True,
+        },
+        capabilities=PlannerCapabilities(web_search_enabled=False, direct_answer_enabled=True),
+    )
+    policy = _policy(plan)
+    assert plan.needs_retrieval is False
+    assert plan.direct_answer_allowed is False
+    assert plan.intent == "unclear"
+    assert "general_web" in policy["unavailable_required_sources"]
+    assert policy["must_disclose_limitations"] is True
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_tool"),
+    [
+        ("根据上传论文总结方法贡献", "hybrid_search"),
+        ("根据上传论文的实验章节说明评估设置", "section_search"),
+        ("根据上传论文的消融表解释性能差异", "artifact_search"),
+        ("找相关论文并给出 DOI 和发表会议", "openalex_search"),
+    ],
+)
+def test_required_source_class_corrects_an_incompatible_direct_answer(question, expected_tool):
+    caps = PlannerCapabilities(
+        hybrid_search_enabled=True,
+        section_search_enabled=True,
+        artifact_search_enabled=True,
+        openalex_search_enabled=True,
+        direct_answer_enabled=True,
+    )
+    plan = normalize_intent_plan(
+        {
+            "question": question,
+            "intent": "direct_answer",
+            "needs_retrieval": False,
+            "retrieval_steps": [],
+            "direct_answer_allowed": True,
+        },
+        capabilities=caps,
+    )
+    assert plan.needs_retrieval is True
+    assert [step.tool for step in plan.retrieval_steps] == [expected_tool]
+
+
+def test_local_artifact_request_does_not_substitute_hybrid_search():
+    caps = PlannerCapabilities(hybrid_search_enabled=True, artifact_search_enabled=True)
+    plan = normalize_intent_plan(
+        {
+            "question": "根据上传论文的消融表解释性能差异",
+            "intent": "local_paper_qa",
+            "needs_retrieval": True,
+            "retrieval_steps": [{"tool": "hybrid_search", "query": "性能差异", "limit": 5}],
+            "max_tools": 1,
+        },
+        capabilities=caps,
+    )
+    assert [step.tool for step in plan.retrieval_steps] == ["artifact_search"]
+    assert plan.retrieval_steps[0].artifact_types == ["table"]
+
+
+def test_mixed_required_sources_are_not_silently_reclassified_when_tool_budget_is_two():
+    caps = PlannerCapabilities(
+        hybrid_search_enabled=True,
+        openalex_search_enabled=True,
+        web_search_enabled=True,
+        direct_answer_enabled=True,
+        max_tools=2,
+    )
+    plan = normalize_intent_plan(
+        {
+            "question": "根据上传论文对比方法，并找相关论文 DOI 和最新政策要求",
+            "intent": "direct_answer",
+            "needs_retrieval": False,
+            "retrieval_steps": [],
+            "direct_answer_allowed": True,
+        },
+        capabilities=caps,
+    )
+    assert set(_req(plan)["required_source_types"]) == {"local_kb", "external_academic", "general_web"}
+    assert len(plan.retrieval_steps) == 2
+    assert "general_web" in _req(plan)["required_source_types"]
 
 
 @pytest.mark.asyncio
@@ -357,10 +617,10 @@ def test_capabilities_filter_unavailable_external_tools_without_local_cues():
         "max_tools": 2,
     }
     plan = normalize_intent_plan(raw, capabilities=caps)
-    assert plan.intent == "direct_answer"
+    assert plan.intent == "unclear"
     assert plan.needs_retrieval is False
     assert plan.retrieval_steps == []
-    assert plan.direct_answer_allowed is True
+    assert plan.direct_answer_allowed is False
     assert any("filtered_unavailable_tools" in w for w in plan.warnings)
     assert "external_retrieval_unavailable" in plan.warnings
     assert "fallback_to_hybrid_after_filter" not in plan.warnings
@@ -386,7 +646,8 @@ def test_web_request_does_not_fallback_to_local_when_web_unavailable():
     plan = normalize_intent_plan(raw, capabilities=caps)
     assert plan.needs_retrieval is False
     assert plan.retrieval_steps == []
-    assert plan.direct_answer_allowed is True
+    assert plan.intent == "unclear"
+    assert plan.direct_answer_allowed is False
     assert "web_search_unavailable" in plan.warnings or "external_retrieval_unavailable" in plan.warnings
     assert "fallback_to_hybrid_after_filter" not in plan.warnings
 
@@ -439,7 +700,7 @@ def test_local_paper_request_does_not_require_external_academic():
     req = _req(plan)
     pol = _policy(plan)
     assert plan.needs_retrieval is True
-    assert "local_kb" in req.get("required_source_types", [])
+    assert "local_section" in req.get("required_source_types", [])
     assert "external_academic" not in req.get("required_source_types", [])
     assert "external_academic" not in pol.get("unavailable_required_sources", [])
     assert pol.get("must_disclose_limitations") is not True
@@ -532,7 +793,7 @@ def test_requested_source_unavailable_does_not_use_incompatible_substitute():
     assert plan.needs_retrieval is False
     assert "local_kb" in pol.get("blocked_source_types", [])
     assert "general_web" in pol.get("unavailable_required_sources", [])
-    assert pol.get("mode") in {"direct_answer", "answer_with_disclosure"}
+    assert pol.get("mode") in {"ask_clarification", "answer_with_disclosure"}
     assert "fallback_to_hybrid_after_filter" not in plan.warnings
 
 
@@ -607,3 +868,98 @@ def test_casual_question_direct_answer():
     pol = _policy(plan)
     assert plan.needs_retrieval is False
     assert pol.get("mode") == "direct_answer"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Please rewrite this paragraph in a more formal tone.",
+        "Translate this sentence into Chinese.",
+        "What is retrieval-augmented generation?",
+        "Explain the basic principle of RRT star.",
+        "Brainstorm three evaluation dimensions for the user-provided proposal.",
+    ],
+)
+def test_direct_answer_allowlist_accepts_stable_or_user_provided_tasks(question):
+    assert infer_direct_answer_eligibility(question)["allowed"] is True
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Is Zhang Xuefeng still alive?",
+        "Summarize the results in the uploaded paper.",
+        "Find related papers and provide their DOI and venue.",
+        "What is the current price of this product?",
+        "Give me the exact quote from the paper's conclusion.",
+    ],
+)
+def test_direct_answer_allowlist_rejects_evidence_dependent_tasks(question):
+    assert infer_direct_answer_eligibility(question)["allowed"] is False
+
+
+def test_model_direct_answer_without_allowlist_eligibility_becomes_clarification():
+    plan = normalize_intent_plan(
+        {
+            "question": "Introduce Zhang Xuefeng.",
+            "intent": "direct_answer",
+            "needs_retrieval": False,
+            "retrieval_steps": [],
+            "direct_answer_allowed": True,
+        },
+        capabilities=PlannerCapabilities(direct_answer_enabled=True),
+    )
+    assert plan.intent == "unclear"
+    assert plan.needs_retrieval is False
+    assert plan.direct_answer_allowed is False
+    assert "direct_answer_not_eligible" in plan.warnings
+
+
+def test_no_tool_fallback_does_not_direct_answer_an_evidence_dependent_question():
+    plan = build_fallback_intent_plan(
+        "Is Zhang Xuefeng still alive?",
+        capabilities=PlannerCapabilities(
+            hybrid_search_enabled=False,
+            vector_search_enabled=False,
+            section_search_enabled=False,
+            artifact_search_enabled=False,
+            openalex_search_enabled=False,
+            web_search_enabled=False,
+            direct_answer_enabled=True,
+        ),
+    )
+    assert plan.intent == "unclear"
+    assert plan.direct_answer_allowed is False
+
+
+def test_local_fallback_preserves_paper_graph_relation_intent():
+    plan = build_fallback_intent_plan("Which later papers extend or improve this method?")
+
+    assert plan.needs_retrieval is True
+    assert plan.use_paper_graph is True
+    assert plan.graph_direction == "incoming"
+    assert plan.graph_relation_types == ["method_lineage", "cites", "semantic_similarity"]
+
+
+def test_explicit_paper_section_scope_forces_section_retrieval():
+    plan = normalize_intent_plan(
+        {
+            "question": "只根据《A Motion Planning Paper》的摘要和引言解释问题。",
+            "intent": "direct_answer",
+            "needs_retrieval": False,
+            "retrieval_steps": [],
+        },
+        capabilities=PlannerCapabilities(),
+    )
+
+    assert plan.needs_retrieval is True
+    assert plan.retrieval_steps[0].tool == "section_search"
+
+
+def test_section_query_expands_common_front_matter_aliases():
+    queries = _expand_section_queries("Abstract or Introduction")
+
+    assert "abstract" in queries
+    assert "summary" in queries
+    assert "introduction" in queries
+    assert "motivation" in queries

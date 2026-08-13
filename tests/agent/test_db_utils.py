@@ -19,6 +19,9 @@ from agent.db_utils import (
     vector_search,
     hybrid_search,
     artifact_search,
+    get_artifact,
+    get_artifact_image,
+    delete_document,
     get_document_chunks,
     test_connection as db_test_connection
 )
@@ -37,6 +40,9 @@ def test_schema_is_idempotent_and_does_not_drop_data():
     assert "DROP INDEX" not in schema
     assert "CREATE TABLE IF NOT EXISTS DOCUMENTS" in schema
     assert "CREATE INDEX IF NOT EXISTS IDX_CHUNKS_EMBEDDING" in schema
+    assert "CREATE TABLE IF NOT EXISTS ARTIFACTS" in schema
+    assert "CREATE TABLE IF NOT EXISTS PAPER_GRAPH_NODES" in schema
+    assert "CREATE TABLE IF NOT EXISTS PAPER_GRAPH_EDGES" in schema
 
 
 class TestDatabasePool:
@@ -133,11 +139,7 @@ class TestSessionManagement:
             assert metadata["client"] == "web"
             assert metadata["title"] == "New Chat"
             assert metadata["title_generated"] is False
-            assert metadata["latest_summary"] == ""
-            assert metadata["compression_count"] == 0
-            assert metadata["compacted_message_count"] == 0
             assert metadata["last_message_at"] is None
-            assert metadata["summary_updated_at"] is None
     
     @pytest.mark.asyncio
     async def test_get_session_exists(self):
@@ -375,6 +377,46 @@ class TestVectorSearch:
             assert results[0]["combined_score"] == 0.90
             assert results[0]["vector_similarity"] == 0.85
             assert results[0]["text_similarity"] == 0.70
+
+    @pytest.mark.asyncio
+    async def test_vector_search_filters_language_and_selected_documents(self):
+        with patch('agent.db_utils.db_pool') as mock_pool:
+            mock_conn = AsyncMock()
+            mock_conn.fetch.return_value = []
+            mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+            mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            await vector_search(
+                [0.1] * 8,
+                embedding_language="en",
+                document_ids=["11111111-1111-1111-1111-111111111111"],
+            )
+
+            sql = mock_conn.fetch.call_args[0][0]
+            params = mock_conn.fetch.call_args[0][1:]
+            assert "embedding_language" in sql
+            assert "ANY($" in sql
+            assert "en" in params
+            assert ["11111111-1111-1111-1111-111111111111"] in params
+
+    @pytest.mark.asyncio
+    async def test_hybrid_search_uses_requested_text_weight_when_scoped(self):
+        with patch('agent.db_utils.db_pool') as mock_pool:
+            mock_conn = AsyncMock()
+            mock_conn.fetch.return_value = []
+            mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+            mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            await hybrid_search(
+                [0.1] * 8,
+                "query",
+                text_weight=0.45,
+                document_ids=["11111111-1111-1111-1111-111111111111"],
+            )
+
+            sql = mock_conn.fetch.call_args[0][0]
+            assert "0.55 * GREATEST" in sql
+            assert "0.45 *" in sql
     
     @pytest.mark.asyncio
     async def test_get_document_chunks(self):
@@ -522,6 +564,84 @@ class TestArtifactSearch:
             assert row["document_title"] == "Doc A"
             assert row["document_source"] == "doc-a.md"
             assert "combined_score" in row
+
+
+class TestArtifactEvidenceStorage:
+    @pytest.mark.asyncio
+    async def test_get_artifact_excludes_image_blob_from_json_response(self):
+        with patch("agent.db_utils.db_pool") as mock_pool:
+            mock_conn = AsyncMock()
+            mock_conn.fetchrow.return_value = {
+                "id": "artifact-1",
+                "document_id": "doc-1",
+                "document_title": "Paper",
+                "artifact_type": "figure",
+                "caption": "Figure 1",
+                "page_number": 3,
+                "section_path": "Experiments",
+                "context_before": "before",
+                "context_after": "after",
+                "raw_content": "reading card",
+                "structured_data": '{"figure_type":"line_chart"}',
+                "retrieval_text": "retrieval card",
+                "has_image": True,
+                "image_media_type": "image/png",
+            }
+            mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+            mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            artifact = await get_artifact("11111111-1111-1111-1111-111111111111")
+
+            assert artifact["has_image"] is True
+            assert artifact["structured_data"]["figure_type"] == "line_chart"
+            assert "image_blob" not in artifact
+
+    @pytest.mark.asyncio
+    async def test_get_artifact_image_returns_only_binary_payload(self):
+        with patch("agent.db_utils.db_pool") as mock_pool:
+            mock_conn = AsyncMock()
+            mock_conn.fetchrow.return_value = {"image_blob": b"png-bytes", "image_media_type": "image/png"}
+            mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+            mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            image = await get_artifact_image("11111111-1111-1111-1111-111111111111")
+
+            assert image == {"content": b"png-bytes", "media_type": "image/png"}
+
+
+@pytest.mark.asyncio
+async def test_delete_document_uses_document_row_for_cascade_cleanup():
+    with patch("agent.db_utils.db_pool") as mock_pool:
+        mock_conn = AsyncMock()
+        mock_conn.execute.return_value = "DELETE 1"
+        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        deleted = await delete_document("11111111-1111-1111-1111-111111111111")
+
+        assert deleted is True
+        assert "DELETE FROM documents" in mock_conn.execute.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_annotation_position_is_persisted_with_relative_coordinates():
+    from agent.db_utils import create_document_annotation
+
+    with patch("agent.db_utils.db_pool") as mock_pool:
+        mock_conn = AsyncMock()
+        now = datetime.now(timezone.utc)
+        mock_conn.fetchrow.return_value = {
+            "id": "annotation-1", "page_number": 2, "page_x": 0.25, "page_y": 0.75,
+            "quote": "", "note": "important finding", "color": "#e0b84c", "created_at": now, "updated_at": now,
+        }
+        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        annotation = await create_document_annotation("11111111-1111-1111-1111-111111111111", {"page_number": 2, "page_x": 0.25, "page_y": 0.75, "note": "important finding"})
+
+    assert annotation["page_x"] == 0.25
+    assert annotation["page_y"] == 0.75
+    assert "page_x" in mock_conn.fetchrow.call_args[0][0]
 
 
 class TestIngestionTaskManagement:

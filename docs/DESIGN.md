@@ -12,7 +12,7 @@ Agentic RAG Paper Assistant 面向复杂科研论文阅读场景。项目目标�
 
 ```mermaid
 flowchart LR
-    User[User] --> UI[Streamlit Workspace]
+    User[User] --> UI[React/Vite Workspace]
     UI --> API[FastAPI Backend]
 
     subgraph Ingestion[PDF Ingestion]
@@ -95,6 +95,7 @@ Planner 不负责最终回答，而是负责轻量规划：
 - 工具是否可用；
 - 是否需要披露来源不可用；
 - 一轮最多调用几个工具。
+- 是否需要用论文知识图谱扩展候选论文范围。
 
 设计约束：
 
@@ -104,6 +105,8 @@ Planner 不负责最终回答，而是负责轻量规划：
 - 外部工具不可用时不能用本地论文冒充外部结果；
 - 普通聊天或常识解释不触发本地知识库检索；
 - 混合请求中尽量保留可用部分，并披露不可用来源。
+- 图谱仅在跨论文比较、相似工作、方法迁移、方法谱系或创新探索等关系型意图下启用；它只补充候选论文，不能作为回答证据。
+- 用户要求严格限定单篇论文时，图谱扩展必须关闭。
 
 ## 7. LangGraph 工作流
 

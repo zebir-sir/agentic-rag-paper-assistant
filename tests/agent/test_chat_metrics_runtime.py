@@ -29,7 +29,7 @@ def test_chat_metrics_summary_tracks_backend_and_source_mix():
         session_id="session-2",
         route="/chat/stream",
         status="cancelled",
-        response_backend="openalex_first",
+        response_backend="langchain",
         requested_search_type="hybrid",
         effective_search_type="hybrid",
         use_web_search=True,
@@ -46,7 +46,7 @@ def test_chat_metrics_summary_tracks_backend_and_source_mix():
     assert snapshot["total_requests"] == 2
     assert snapshot["stream_requests"] == 1
     assert snapshot["backend_counts"]["langgraph"] == 1
-    assert snapshot["backend_counts"]["openalex_first"] == 1
+    assert snapshot["backend_counts"]["langchain"] == 1
     assert snapshot["status_counts"]["success"] == 1
     assert snapshot["status_counts"]["cancelled"] == 1
     assert snapshot["source_mix_counts"]["local_only"] == 1

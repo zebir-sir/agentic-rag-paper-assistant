@@ -1,0 +1,14 @@
+services:
+  api:
+    volumes:
+      - .:/app
+    command: uvicorn agent.api:app --host ${APP_HOST} --port ${APP_PORT} --reload
+
+  ingestion-worker:
+    volumes:
+      - .:/app
+
+  web:
+    volumes:
+      - ./web:/app/web
+      - /app/web/node_modules

@@ -120,28 +120,25 @@ class SessionMemoryPreviewItem(BaseModel):
     content: str
 
 
-class SessionMemorySections(BaseModel):
-    current_topic: str = ""
-    user_constraints: str = ""
-    confirmed_facts: str = ""
-    user_focus: str = ""
-    pending_questions: str = ""
-    unknowns: str = ""
+class SessionMemorySummary(BaseModel):
+    goal: str = ""
+    scope_document_ids: List[str] = Field(default_factory=list)
+    constraints: List[str] = Field(default_factory=list)
+    confirmed_decisions: List[str] = Field(default_factory=list)
+    open_questions: List[str] = Field(default_factory=list)
+    uncertainties: List[str] = Field(default_factory=list)
 
 
 class SessionMemorySnapshot(BaseModel):
     session_id: str
-    latest_summary: str = ""
-    compression_count: int = 0
-    compacted_message_count: int = 0
-    summary_updated_at: Optional[str] = None
-    history_message_count: int = 0
-    sanitized_history_count: int = 0
+    version: int = 0
+    covered_message_count: int = 0
+    summary: SessionMemorySummary = Field(default_factory=SessionMemorySummary)
+    updated_at: Optional[str] = None
+    eligible_message_count: int = 0
     recent_message_count: int = 0
-    using_summary_context: bool = False
-    full_history_estimated_tokens: int = 0
-    summary_context_estimated_tokens: int = 0
-    summary_sections: SessionMemorySections = Field(default_factory=SessionMemorySections)
+    using_structured_memory: bool = False
+    recent_context_estimated_tokens: int = 0
     recent_messages_preview: List[SessionMemoryPreviewItem] = Field(default_factory=list)
 
 
@@ -149,7 +146,12 @@ class IngestionTaskResponse(BaseModel):
     task_id: str
     document_id: Optional[str] = None
     file_path: str
+    filename: str = ""
+    fast: bool = False
     status: str
+    queue_order: int = 0
+    progress_percent: int = 0
+    progress_stage: str = "等待入库"
     error_message: Optional[str] = None
     retry_count: int = 0
     created_at: datetime

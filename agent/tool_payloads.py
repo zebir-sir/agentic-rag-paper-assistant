@@ -41,9 +41,35 @@ def collect_hits(deps: AgentDependencies, payloads: List[Dict[str, Any]]) -> Non
         _collect_evidence_hit(deps, hit)
 
 
-async def run_vector_search_payload(deps: AgentDependencies, query: str, limit: int) -> List[Dict[str, Any]]:
+def _scoped_document_ids(deps: AgentDependencies, document_id: Optional[str] = None) -> tuple[Optional[str], Optional[List[str]]]:
+    selected_ids = list(
+        dict.fromkeys(
+            str(value).strip()
+            for value in (deps.search_preferences or {}).get("selected_document_ids", [])
+            if str(value).strip()
+        )
+    )
+    if not selected_ids:
+        return document_id, None
+    return (document_id if document_id in selected_ids else None), selected_ids
+
+
+async def run_vector_search_payload(
+    deps: AgentDependencies,
+    query: str,
+    limit: int,
+    document_ids: Optional[List[str]] = None,
+    embedding_language: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     try:
-        results = await vector_search_tool(VectorSearchInput(query=query, limit=limit))
+        _, selected_document_ids = _scoped_document_ids(deps)
+        effective_document_ids = document_ids or selected_document_ids
+        results = await vector_search_tool(VectorSearchInput(
+            query=query,
+            limit=limit,
+            document_ids=effective_document_ids,
+            embedding_language=embedding_language,
+        ))
         payload = [chunk_result_to_payload(r) for r in results]
         collect_hits(deps, payload)
         return payload
@@ -57,9 +83,21 @@ async def run_hybrid_search_payload(
     query: str,
     limit: int,
     text_weight: float = 0.3,
+    document_ids: Optional[List[str]] = None,
+    embedding_language: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     try:
-        results = await hybrid_search_tool(HybridSearchInput(query=query, limit=limit, text_weight=text_weight))
+        _, selected_document_ids = _scoped_document_ids(deps)
+        effective_document_ids = document_ids or selected_document_ids
+        results = await hybrid_search_tool(
+            HybridSearchInput(
+                query=query,
+                limit=limit,
+                text_weight=text_weight,
+                document_ids=effective_document_ids,
+                embedding_language=embedding_language,
+            )
+        )
         payload = [chunk_result_to_payload(r) for r in results]
         collect_hits(deps, payload)
         return payload
@@ -159,14 +197,18 @@ async def run_section_search_payload(
     section_query: str,
     limit: int,
     document_id: Optional[str] = None,
+    document_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     try:
+        scoped_document_id, selected_document_ids = _scoped_document_ids(deps, document_id)
+        effective_document_ids = document_ids or selected_document_ids
         results = await section_search_tool(
             SectionSearchInput(
                 query=query,
                 section_query=section_query,
                 limit=limit,
-                document_id=document_id,
+                document_id=scoped_document_id,
+                document_ids=effective_document_ids,
             )
         )
         payload = [chunk_result_to_payload(r) for r in results]
@@ -183,16 +225,22 @@ async def run_artifact_search_payload(
     limit: int = 10,
     artifact_types: Optional[List[str]] = None,
     document_id: Optional[str] = None,
+    document_ids: Optional[List[str]] = None,
     text_weight: float = 0.3,
+    embedding_language: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     try:
+        scoped_document_id, selected_document_ids = _scoped_document_ids(deps, document_id)
+        effective_document_ids = document_ids or selected_document_ids
         results = await artifact_search_tool(
             ArtifactSearchInput(
                 query=query,
                 limit=limit,
                 artifact_types=artifact_types,
-                document_id=document_id,
+                document_id=scoped_document_id,
+                document_ids=effective_document_ids,
                 text_weight=text_weight,
+                embedding_language=embedding_language,
             )
         )
         payload = [chunk_result_to_payload(r) for r in results]

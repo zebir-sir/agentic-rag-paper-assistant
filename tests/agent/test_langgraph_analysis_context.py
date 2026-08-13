@@ -6,7 +6,7 @@ import langchain.agents as langchain_agents
 if not hasattr(langchain_agents, "create_agent"):
     langchain_agents.create_agent = lambda *args, **kwargs: None
 
-from agent.agent_langgraph import run_langgraph_analysis
+from agent.agent_langgraph import local_retrieval_node, run_langgraph_analysis
 from agent.agent_runtime import AgentDependencies
 
 
@@ -87,3 +87,57 @@ async def test_run_langgraph_analysis_direct_answer_skips_document_inspection(mo
 
     assert result.message
     assert result.metadata["retrieval_skipped_by_planner"] is True
+
+
+@pytest.mark.asyncio
+async def test_graph_expansion_requires_planner_approval_and_respects_strict_scope(monkeypatch):
+    async def fake_neighbors(_document_ids, limit, relation_types=None, direction="both"):
+        assert limit == 4
+        assert relation_types == ["cites"]
+        assert direction == "outgoing"
+        return ["neighbor-1"]
+
+    monkeypatch.setattr("agent.agent_langgraph.get_graph_neighbor_document_ids", fake_neighbors)
+    monkeypatch.setattr("agent.agent_langgraph.build_langchain_tools", lambda _deps: [])
+
+    deps = AgentDependencies(
+        session_id="s3",
+        search_preferences={"use_paper_graph": True},
+    )
+    base_state = {
+        "deps": deps,
+        "question": "跨论文比较方法",
+        "current_query": "跨论文比较方法",
+        "metadata": {"planner_used": True},
+        "intent_plan": {
+            "intent": "multi_paper_compare",
+            "needs_retrieval": True,
+            "retrieval_steps": [{"tool": "hybrid_search", "query": "跨论文比较方法", "limit": 5}],
+            "max_tools": 1,
+            "use_paper_graph": True,
+            "graph_usage_reason": "cross_paper_comparison",
+            "graph_relation_types": ["cites"],
+            "graph_direction": "outgoing",
+            "graph_neighbor_limit": 4,
+        },
+        "target_documents": [{"document_id": "seed-1", "document_language": "en"}],
+        "scope_policy": "prefer_target",
+        "allow_supplemental": True,
+        "retrieval_results": [],
+        "retrieval_attempt_count": 0,
+        "retrieval_attempts": [],
+        "planning_only": True,
+        "max_retrieval_attempts": 2,
+    }
+
+    planned = await local_retrieval_node(base_state)
+    assert planned["metadata"]["paper_graph_used"] is True
+    assert planned["metadata"]["graph_expanded_document_ids"] == ["neighbor-1"]
+    assert planned["metadata"]["paper_graph_relation_policy_fallback"] is False
+
+    strict_state = dict(base_state)
+    strict_state["metadata"] = {"planner_used": True}
+    strict_state["scope_policy"] = "strict_target"
+    strict = await local_retrieval_node(strict_state)
+    assert strict["metadata"]["paper_graph_used"] is False
+    assert strict["metadata"]["paper_graph_usage_reason"] == "blocked_by_strict_target_scope"

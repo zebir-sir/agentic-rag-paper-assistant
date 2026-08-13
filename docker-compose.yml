@@ -46,10 +46,11 @@ services:
       retries: 5
 
   api:
+    image: agentic-rag-project-main2-runtime:latest
     build:
       context: .
       dockerfile: Dockerfile
-      target: api
+      target: runtime
     container_name: agent_api_main1
     command: uvicorn agent.api:app --host ${APP_HOST} --port ${APP_PORT}
     ports:
@@ -58,6 +59,10 @@ services:
     environment:
       STREAM_BACKEND: ${STREAM_BACKEND:-langchain}
       PYTHONPATH: /app
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+      HF_HUB_DISABLE_XET: "1"
+    volumes:
+      - huggingface_cache_main2:/root/.cache/huggingface
     healthcheck:
       test: ["CMD", "python", "-c", "import requests; r=requests.get('http://localhost:8888/health/live', timeout=3); raise SystemExit(0 if r.status_code == 200 else 1)"]
       interval: 10s
@@ -70,17 +75,20 @@ services:
     restart: unless-stopped
 
   ingestion-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: worker
+    image: agentic-rag-project-main2-runtime:latest
     container_name: agent_ingestion_worker_main1
     command: python -m agent.ingestion_worker
+    healthcheck:
+      disable: true
     env_file: .env
     environment:
       PYTHONPATH: /app
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+      HF_HUB_DISABLE_XET: "1"
       INGESTION_MAX_RETRIES: ${INGESTION_MAX_RETRIES:-3}
       INGESTION_DLQ_NAME: ${INGESTION_DLQ_NAME:-ingestion_tasks_dlq}
+    volumes:
+      - huggingface_cache_main2:/root/.cache/huggingface
     depends_on:
       postgres:
         condition: service_healthy
@@ -88,18 +96,14 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  ui:
+  web:
     build:
       context: .
       dockerfile: Dockerfile
-      target: ui
-    container_name: agent_ui_main1
-    command: streamlit run ui/app.py --server.port=${SERVER_PORT} --server.address=${SERVER_HOST}
+      target: web
+    container_name: agent_web_main1
     ports:
-      - "8502:8501"
-    env_file: .env
-    environment:
-      PYTHONPATH: /app
+      - "5174:5173"
     depends_on:
       api:
         condition: service_healthy
@@ -107,4 +111,6 @@ services:
 
 volumes:
   postgres_data_main1:
+    driver: local
+  huggingface_cache_main2:
     driver: local

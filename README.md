@@ -1,60 +1,59 @@
 <div align="center">
 
-# 📚 Agentic RAG Paper Assistant
+# PaperWeave
 
-**面向科研论文阅读、证据追踪与多源检索的 Agentic RAG 工程工作台**
+**面向个人研究者的论文知识空间与研究发现助手**
 
-基于 **FastAPI + Streamlit + PostgreSQL/pgvector + LangChain/LangGraph** 构建，支持 PDF 论文结构化入库、章节级检索、图表/算法证据抽取、OpenAlex 学术检索、流式多轮问答、证据引用审查与可回归评测；同时提供 **RabbitMQ 异步入库、Redis 查询缓存、运行时指标、健康检查和请求中间件**，便于在本地或私有化环境中稳定处理较耗时的论文分析任务。
+从论文入库、原文精读到知识星图与研究问答，帮助研究者沉淀自己的文献脉络，理解方法关系，并在可靠证据约束下发现可迁移思路与潜在创新点。
 
 <br />
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?style=for-the-badge&logo=fastapi&logoColor=white)
-![Streamlit](https://img.shields.io/badge/Streamlit-UI-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)
-![LangGraph](https://img.shields.io/badge/LangGraph-Agentic_Workflow-1C3C3C?style=for-the-badge)
+![React](https://img.shields.io/badge/React-Vite-61DAFB?style=for-the-badge&logo=react&logoColor=20232A)
+![FastAPI](https://img.shields.io/badge/FastAPI-SSE_Backend-009688?style=for-the-badge&logo=fastapi&logoColor=white)
+![LangGraph](https://img.shields.io/badge/LangGraph-Agent_Workflow-1C3C3C?style=for-the-badge)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL%20%2B%20pgvector-Evidence_Store-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
-![RabbitMQ](https://img.shields.io/badge/RabbitMQ-Async_Ingestion-FF6600?style=for-the-badge&logo=rabbitmq&logoColor=white)
-![Redis](https://img.shields.io/badge/Redis-Query_Cache-DC382D?style=for-the-badge&logo=redis&logoColor=white)
+![Docling](https://img.shields.io/badge/Docling-Structured_PDF-2B6CB0?style=for-the-badge)
+![Three.js](https://img.shields.io/badge/Three.js-3D_Knowledge_Graph-000000?style=for-the-badge&logo=threedotjs&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 
 <br />
 
 [项目简介](#-项目简介) ·
 [核心能力](#-核心能力) ·
-[工程亮点](#-工程亮点) ·
 [界面预览](#-界面预览) ·
 [系统架构](#-系统架构) ·
 [快速开始](#-快速开始) ·
-[测试与评测](#-测试与评测) ·
-[项目结构](#-项目结构) ·
-[Roadmap](#-roadmap)
+[评测结果](#-评测结果) ·
+[项目结构](#-项目结构)
 
 </div>
 
 ---
 
-![Workspace Overview](docs/assets/workspace-overview.png)
+![PaperWeave workspace](docs/assets/chat-research-workspace.png)
 
 ## 📌 项目简介
 
-**Agentic RAG Paper Assistant** 是一个面向科研论文阅读场景的 Agentic RAG 系统。它不是简单的“向量检索 + LLM 总结”Demo，而是围绕长 PDF 论文的结构化入库、多源证据检索、来源边界控制、多轮上下文管理和可追踪回答生成，构建了一套端到端的论文分析工作流。
+**PaperWeave** 是面向个人研究型用户的长期论文知识空间：研究者不是“上传一篇、问一个问题”，而是持续把文献沉淀为可阅读、可关联、可检索、可追问的个人研究网络。
 
-项目覆盖论文总结、方法拆解、实验解读、创新点分析、多篇论文对比、related work 检索和私有论文知识库问答等场景。对于较大的 PDF 或批量入库任务，系统支持将解析、切块、embedding 与向量入库交给 RabbitMQ worker 后台处理，避免长任务阻塞前端请求。
+1. **沉淀个人论文库**：把正文、章节、图表、算法、批注与原始 PDF 留在同一个可持续更新的知识底座中。
+2. **在阅读中建立理解**：在原文中划词翻译、批注和追问，不离开当前阅读上下文。
+3. **从关系中导航研究**：把每篇论文映射为中文可读的知识星图节点，沿相似性、引用和方法谱系理解研究脉络。
+4. **让助手辅助研究发现**：助手按问题选择论文、章节、算法/图表、星图候选关系或外部学术元数据，给出可回溯结论、方法迁移线索与创新讨论的起点。
 
-### 为什么不只是普通 RAG？
+系统适合构建任意研究方向的个人论文库，例如 RRT、运动规划、机器人、控制、视觉或其他领域。知识星图用于扩展思考与候选发现；对论文事实、实验数字和方法细节的结论始终回到入库原文，外部 OpenAlex 与网页信息也会明确区分来源。
 
-普通 RAG 在论文场景中容易遇到这些问题：
+### 研究者真正需要什么？
 
-| 问题 | 项目中的处理方式 |
+| 研究过程中的断点 | PaperWeave 的处理方式 |
 |---|---|
-| 固定长度切块破坏章节边界 | 使用 section-aware chunking 保留章节路径、行号和分片信息 |
-| 表格、图示、算法证据容易被正文检索忽略 | 将 table / figure / algorithm 抽取为独立 artifact evidence |
-| 本地论文、OpenAlex、网页和模型知识容易混淆 | 使用 source-aware planner 与 source policy 约束来源边界 |
-| 初次检索不足时缺少恢复机制 | 使用 LangGraph 显式组织 retrieval grading、query rewrite 和 retry |
-| 多轮论文分析容易污染上下文 | 使用 history resolver、dialog policy 和 memory runtime 压缩会话记忆 |
-| 回答依据难以验证 | 生成阶段注入 evidence references，并进行 answer review 与 citation review |
-| PDF 入库任务耗时 | 支持 RabbitMQ 异步任务队列和 worker 后台入库 |
-| 重复 embedding 成本高 | 使用 Redis query embedding cache，缓存不可用时自动降级 |
+| 论文读完即散，无法形成长期积累 | 将原文、结构、翻译、批注、图表和算法留存在个人知识空间 |
+| 难以把一篇论文放回研究脉络 | 星图展示相似工作、引用与方法谱系，节点和关系均可继续查看 |
+| 看懂局部文字却不易把握方法关系 | 从选区、章节、算法、实验或跨论文关系发起上下文问答 |
+| 创新讨论容易脱离已有工作 | 图谱只提供候选扩展，最终回答必须回到原文证据并标明边界 |
+| 大批文献进入库后不可控 | 任务队列支持顺序、进度、暂停、恢复、删除和额度保护 |
+| 学术术语翻译前后不一致 | 全文术语 profile + 选区缓存，保留缩写、公式、数字与引用 |
 
 ---
 
@@ -62,112 +61,54 @@
 
 | 能力 | 说明 |
 |---|---|
-| **Section-aware Ingestion** | 使用 Docling 解析 PDF，并基于 Markdown heading 识别论文结构，保留 `section_title`、`section_path_text`、行号范围和章节内分片。 |
-| **Artifact Evidence Extraction** | 将表格、图示、算法、伪代码等非正文信息抽取为独立 evidence chunk，保留 caption、上下文和章节路径。 |
-| **Source-aware Intent Planner** | Planner 输出结构化 `IntentPlan`，区分用户意图、目标来源、可用工具、不可用能力和回答边界。 |
-| **LangGraph Agent Workflow** | 将复杂问答拆成意图规划、文档检查、范围解析、检索规划、检索执行、质量评估、重写重试、生成、证据检查、回答审查和最终整理。 |
-| **Multi-turn Memory** | 支持会话历史解析、问题补全、上下文压缩和多轮约束继承，适合连续分析同一篇或多篇论文。 |
-| **Evidence Citation Review** | 为检索片段生成编号引用，要求关键事实声明带引用标记，并记录缺失引用、非法引用、引用与证据不一致的断言和证据覆盖风险。 |
-| **Answer Review Runtime** | 对本地论文问答中的未支撑数字、机制断言和证据缺口进行轻量审查，必要时追加风险提示。 |
-| **Fast Chat Path** | 对普通聊天、简单解释和无需检索的问题走轻量路径，避免所有请求都进入重型 RAG workflow。 |
-| **Async Ingestion** | 支持 RabbitMQ 任务投递、worker 消费、任务状态记录和失败信息回传，适合批量 PDF 入库。 |
-| **Redis Cache & Degrade** | 对 query embedding 做短期缓存，Redis 不可用时自动 fallback，不影响主流程可用性。 |
-| **Runtime Middleware** | 提供 request id、请求大小限制、轻量限流、安全响应头、异常格式化和 runtime metrics。 |
-| **Health & Readiness** | 提供运行时健康检查、组件可用性检查和配置快照，便于 Docker/部署环境排查。 |
-| **Evaluation Toolkit** | 提供入库质量、来源边界、检索契约、检索循环恢复和回答 groundedness 等评测脚本。 |
-
----
-
-## 🧠 工程亮点
-
-### 1. Source 不等于 Tool
-
-项目没有把“选择工具”当成完整规划，而是先区分信息来源：
-
-| Source Type | 工具 / 来源 | 适用场景 | 设计边界 |
-|---|---|---|---|
-| `local_kb` | vector / hybrid search | 已上传论文的全文问答、总结、对比 | 作为本地论文证据，不冒充外部网页或学术检索结果 |
-| `local_section` | section_search | 只看 Abstract / Method / Experiments / References 等章节 | 依赖章节 metadata，适合章节限定问题 |
-| `local_artifact` | artifact_search | 表格、图示、算法、伪代码相关问题 | 作为非正文证据补充，用于实验指标、流程图和算法步骤 |
-| `external_academic` | OpenAlex | related work、作者、年份、DOI、venue、开放获取链接 | 返回论文元数据和摘要线索，不等同于本地全文 |
-| `general_web` | Web Search Provider | 通用网页资料、最新信息、非论文来源 | 可选能力，未配置时不会伪造联网结果 |
-| `model_knowledge` | Direct Answer | 普通知识解释、无须证据的对话 | 不能替代本地论文证据 |
-
-这个设计让回答生成前的来源选择、工具调用和结果解释更清晰，也方便在多源检索场景下保留可追踪的证据链。
-
-### 2. LangGraph 节点化工作流
-
-当前深度分析链路已经从单一大节点拆成更清晰的阶段：
-
-```text
-initial_intent_planning
-  -> inspect_documents
-  -> resolve_answer_scope
-  -> plan_retrieval
-  -> execute_retrieval
-  -> grade_retrieval
-  -> decide_after_grade
-  -> rewrite_query
-  -> build_generation_context
-  -> generate_answer
-  -> evidence_check
-  -> answer_review
-  -> finalize
-```
-
-每个阶段都有明确职责，检索失败、来源不可用、证据不足、回答越界等状态都会写入 metadata，便于观察、测试和回归。
-
-### 3. 证据驱动的回答生成
-
-系统会把检索结果整理成可引用的 evidence references，生成回答时要求关键事实声明尽量标注 `[1]`、`[2]` 这类证据编号。生成后再通过 citation review 检查：
-
-- 是否引用了不存在的 evidence id；
-- 是否存在关键事实声明没有引用；
-- 引用的证据是否支持该事实声明，避免将不匹配的数字或结论归因给正确的编号；
-- evidence reference 数量是否足够；
-- citation risk 是否需要写入 metadata。
-
-这套机制把“回答是否有依据”从纯 prompt 约束前移到 runtime 层，适合在论文问答、实验对比和方法总结等场景中提升可核查性。
-
-### 4. 异步入库与可降级中间件
-
-PDF 解析和 embedding 是典型慢任务。项目提供两条路径：
-
-- 小文件或本地调试可以同步入库；
-- 批量 PDF 或较大文件可以投递到 RabbitMQ，由 worker 后台处理。
-
-Redis 只作为轻量缓存层，不替代 PostgreSQL/pgvector 的主存储。RabbitMQ 和 Redis 都设计成可选增强能力，不可用时主流程可以降级或给出明确错误，而不是静默失败。
-
-数据库初始化脚本可重复执行：仅在表和索引不存在时创建对象，不会在服务启动或部署时删除已有论文、会话和入库任务数据。
-
-### 5. 面向部署的运行时能力
-
-后端不仅提供核心问答接口，还补充了真实工程项目常见的基础设施：
-
-- request id 注入；
-- 统一错误响应；
-- 请求大小限制；
-- 简单限流；
-- 安全响应头；
-- runtime metrics；
-- health / readiness；
-- 配置读取与运行时快照。
-
-这些能力让系统不仅能完成本地演示，也便于在 Docker、本地服务和私有化部署环境中进行排查与维护。
+| **个人知识空间** | 以论文为长期单位保存原文、结构、证据、翻译、批注与关系，而不是一次性上传文件。 |
+| **研究关系星图** | 每篇论文以完整标题缩写为发光节点；提供中文的研究问题、核心方法、创新点、关键词和关系解读。 |
+| **创新与迁移辅助** | 面向“该方法可迁移到哪里”“哪些工作值得比较”“研究缺口在哪里”等问题，图谱与原文共同提供可追溯的讨论起点。 |
+| **上下文精读** | 原文可缩放、划词高亮、术语一致的中文翻译、批注以及“提问”入口都在同一阅读界面。 |
+| **可管理的持续入库** | 多选 PDF 后按用户顺序处理；可暂停、恢复、重排、删除，额度不足时停止占用资源并保留文件。 |
+| **多粒度证据** | 不只检索正文：章节、图、表、算法与伪代码都可成为回答依据。 |
+| **可信研究问答** | 回答可展开至论文与片段；本地原文、星图导航、OpenAlex、网页和直接回答保持来源边界。 |
+| **跨语言研究体验** | 中文问题可检索英文语料；全文术语 profile 与选区缓存降低重复翻译并保持术语一致。 |
 
 ---
 
 ## 🖼 界面预览
 
-| Agentic 流式分析 | 证据追踪 |
-|---|---|
-| ![Streaming Analysis](docs/assets/streaming-analysis.png) | ![Evidence Tracing](docs/assets/evidence-tracing.png) |
-| Planner 自动判断检索来源，并以流式状态展示规划、检索与生成过程。 | 展开依据片段后可查看论文来源、章节路径、行号、分片和相似度。 |
+### 1. 研究工作台：多轮论文问答
 
-| 论文分析面板 | OpenAlex 学术检索 |
-|---|---|
-| ![Analysis Panel](docs/assets/analysis-panel.png) | ![OpenAlex Search](docs/assets/openalex-search.png) |
-| 支持上传入库、单篇总结、创新点分析、方法拆解、实验解读和多篇对比。 | 支持 related work 检索，展示作者、年份、DOI、来源链接，并与本地知识库来源区分。 |
+![多论文研究问答](docs/assets/chat-research-workspace.png)
+
+在单篇、选定多篇或整个知识库范围内提问。复杂问题可进入深度分析路径，流式生成期间只标记最新回复，并自动跟随至最新对话。
+
+### 2. 原文划词、上下文翻译与提问
+
+![PDF 划词翻译](docs/assets/pdf-selection-translation.png)
+
+选择 PDF 原文后，左侧高亮保留至下一次选择或点击选区外；右侧先利用全文术语 profile 再翻译选区。术语、公式、数字、引用和缩写保持一致，命中缓存时直接复用。
+
+### 3. 算法与伪代码证据问答
+
+![算法证据问答](docs/assets/algorithm-evidence-answer.png)
+
+对于算法流程、伪代码、图表或实验结果类问题，系统可以使用独立 artifact evidence，而不是只检索正文段落。
+
+### 4. 来源与证据展开
+
+![来源展示](docs/assets/evidence-sources.png)
+
+回答的“查看依据”会展开来源类型、论文标题、章节/片段摘要以及可打开的论文入口。来源展示是回答可核查链路的一部分，而不是装饰性引用。
+
+### 5. 论文关系知识星图
+
+![3D 知识星图](docs/assets/knowledge-graph.png)
+
+银河背景中的发光节点代表论文。关系边用于相似工作、引用和方法谱系导航；点击节点或边可聚焦关系并查看中文信息，旋转随聚焦停止。图谱服务于候选检索与创新启发，不作为事实证据本身。
+
+### 6. 批量入库与任务管理
+
+![入库任务队列](docs/assets/ingestion-queue.png)
+
+一次选择多篇 PDF，查看进度并调整队列。完整入库会处理正文、算法、表格与图片；快速入库只处理正文。任务可以暂停、恢复或删除。
 
 ---
 
@@ -175,79 +116,72 @@ Redis 只作为轻量缓存层，不替代 PostgreSQL/pgvector 的主存储。Ra
 
 ```mermaid
 flowchart LR
-    User[User] --> UI[Streamlit Research Workspace]
-    UI --> API[FastAPI Backend]
+    User[研究者] --> UI[React / Vite 工作台]
+    UI --> API[FastAPI + SSE]
 
-    subgraph Ingestion[PDF Ingestion]
-        PDF[PDF Papers] --> Mode{Sync / Async}
-        Mode --> Docling[Docling Parser]
-        Mode --> Queue[RabbitMQ Queue]
-        Queue --> Worker[Ingestion Worker]
-        Worker --> Docling
-        Docling --> Chunker[Section-aware Chunker]
-        Chunker --> Artifact[Table / Figure / Algorithm Artifacts]
+    subgraph Ingestion[结构化入库]
+        PDF[PDF 论文] --> Queue[任务队列]
+        Queue --> Worker[RabbitMQ Worker]
+        Worker --> Parse[Docling / PDFium 解析]
+        Parse --> Chunk[章节感知切块]
+        Chunk --> Artifact[图 / 表 / 算法证据]
         Artifact --> Embed[Embedding]
         Embed --> Store[(PostgreSQL + pgvector)]
     end
 
-    subgraph Runtime[Agentic RAG Runtime]
-        API --> Middleware[HTTP Middleware / Metrics]
-        Middleware --> Cache[(Redis Query Embedding Cache)]
-        Middleware --> Planner[Source-aware Intent Planner]
-        Planner --> Memory[History Resolver / Memory Runtime]
-        Memory --> Scope[Answer Scope Resolver]
-        Scope --> Graph[LangGraph Workflow]
-        Graph --> Local[Vector / Hybrid / Section / Artifact Retrieval]
+    subgraph Research[个人研究空间]
+        API --> Reader[PDF 精读 / 翻译 / 批注]
+        API --> Planner[研究意图与来源策略]
+        Planner --> Graph[研究问答工作流]
+        Graph --> Local[论文 / 章节 / 图表 / 算法证据]
         Local --> Store
-        Graph --> Quality[Retrieval Quality Check]
-        Quality --> Rewrite[Query Rewrite / Retry]
-        Rewrite --> Local
-        Graph --> Generate[Evidence-aware Generation]
-        Generate --> Review[Answer Review / Citation Review]
+        Graph --> PaperGraph[知识星图：关系导航与候选扩展]
+        PaperGraph --> Store
+        Graph --> OpenAlex[OpenAlex]
+        Graph --> Web[可选网页检索]
+        Graph --> Review[证据检查 + 研究回答审查]
+        Review --> Answer[回答 / 来源 / 下一步研究线索]
     end
 
-    Graph --> OpenAlex[OpenAlex Academic Search]
-    Graph --> Web[Optional Web Search]
-    Review --> Sources[Answer + Evidence Sources]
-    Sources --> UI
+    Reader --> API
+    Answer --> UI
 ```
 
-### PDF 入库流程
+### 入库链路
 
-```mermaid
-flowchart LR
-    A[Upload PDF] --> M{Ingestion Mode}
-    M -->|Sync| B[Docling Parse]
-    M -->|Async| Q[RabbitMQ Queue]
-    Q --> W[Ingestion Worker]
-    W --> B
-    B --> C[Markdown-like Document]
-    C --> D[Section Detection]
-    D --> E[Section-aware Chunks]
-    D --> F[Artifact Chunks]
-    E --> G[Embedding]
-    F --> G
-    G --> H[(documents / chunks)]
+```text
+选择多篇 PDF
+  -> 创建持久化入库任务
+  -> RabbitMQ worker 顺序消费
+  -> Docling 解析结构、保存 PDF 与图片资产
+  -> 章节感知切块 + 图/表/算法 artifact
+  -> embedding + PostgreSQL/pgvector
+  -> 更新知识图谱节点与关系
 ```
 
-### Agentic RAG 问答流程
+### 研究发现与问答链路
 
-```mermaid
-flowchart TD
-    Q[User Question] --> H[History Resolution]
-    H --> P[Intent Planning]
-    P --> C[Capability Check]
-    C --> S[Source Policy & Answer Scope]
-    S --> R[Planned Retrieval]
-    R --> G[Retrieval Quality Evaluation]
-    G -->|Sufficient| B[Build Generation Context]
-    G -->|Insufficient| W[Query Rewrite / Retry]
-    W --> R
-    B --> A[Evidence-aware Generation]
-    A --> E[Evidence Check]
-    E --> V[Answer Review / Citation Review]
-    V --> F[Final Answer + Sources + Metadata]
+```text
+研究问题 + 选定论文范围
+  -> 历史、当前研究对象与意图解析
+  -> 来源策略（论文 / 章节 / 图表算法 / 星图 / OpenAlex / 网页 / direct）
+  -> 按需以星图扩展候选论文
+  -> 计划检索与质量检查
+  -> 必要时 query rewrite / retry
+  -> 证据约束回答、来源展示、关系边界与研究启发
 ```
+
+### 来源边界
+
+| 来源类型 | 典型工具 | 用途 | 回答约束 |
+|---|---|---|---|
+| 本地论文正文 | `hybrid_search` / `vector_search` | 概念、方法、结论、跨论文比较 | 作为原文证据 |
+| 限定章节 | `section_search` | 摘要、引言、方法、实验、结论等限定问题 | 只使用命中的章节范围 |
+| 图表与算法 | `artifact_search` | 伪代码步骤、图示结构、表格指标 | 不从未展示内容虚构定量结论 |
+| 论文关系图 | 图谱关系运行时 | 发现相近、引用、方法谱系、可比较工作与迁移候选 | 只能导航，不能单独证明事实 |
+| OpenAlex | `search_openalex_papers` | related work 与学术元数据 | 只展示实际返回元数据 |
+| 通用网页 | `search_web` | 时效性、非论文信息 | 未配置时明确说明不可用 |
+| 直接回答 | 无检索 | 常识性解释 | 不伪装成论文证据 |
 
 ---
 
@@ -255,97 +189,164 @@ flowchart TD
 
 | 层级 | 技术 |
 |---|---|
-| Frontend | Streamlit |
-| Backend | FastAPI, Uvicorn, SSE |
-| Agent Workflow | LangChain, LangGraph |
-| Vector Store | PostgreSQL 17, pgvector, pg_trgm |
-| Async Task | RabbitMQ, ingestion worker |
-| Cache | Redis query embedding cache |
-| PDF Parsing | Docling |
-| Embedding / LLM | OpenAI-compatible API |
-| Academic Search | OpenAlex |
-| General Web Search | Tavily / SerpAPI / Brave / Bing / Bocha / Custom Provider |
-| Observability | request id, runtime metrics, health/readiness |
-| Testing | pytest, pytest-asyncio, pytest-mock |
-| Deployment | Docker Compose |
+| 前端 | React 19、Vite、Lucide、PDF.js、Three.js |
+| 后端 | FastAPI、Uvicorn、SSE、Pydantic |
+| Agent | LangChain、LangGraph、OpenAI-compatible API |
+| 文档解析 | Docling、PDFium fallback、可选视觉分析适配器 |
+| 存储与检索 | PostgreSQL 17、pgvector、pg_trgm |
+| 任务与缓存 | RabbitMQ、Redis |
+| 评测 | pytest、真实语料检索/问答/功能契约评测 |
+| 部署 | Docker Compose，共享 runtime 镜像与 Hugging Face 缓存卷 |
 
 ---
 
 ## 🚀 快速开始
 
+### 前置条件
+
+- Docker Desktop（Linux containers）已启动；
+- Node.js 已安装，仅用于本地 Vite 前端；
+- 已存在运行时镜像 `agentic-rag-project-main2-runtime:latest` 和 `web/node_modules` 时，日常启动**不要**重新下载或构建依赖；
+- 配置 `.env` 中的模型与数据库参数。不要提交真实密钥。
+
 ### 1. 配置环境变量
 
-```bash
-cp .env.example .env
+```powershell
+Set-Location D:\agent\agentic_rag_project-main2
+Copy-Item .env.example .env
 ```
 
-至少需要配置 OpenAI-compatible 模型和 embedding 服务：
+至少配置以下模型参数：
 
 ```env
 OPENAI_API_KEY=your_api_key
 OPENAI_BASE_URL=https://your-openai-compatible-endpoint/v1
-LLM_MODEL=your-chat-model
+LLM_CHOICE=your-chat-model
 EMBEDDING_MODEL=your-embedding-model
+EMBEDDING_DIMENSIONS=1024
 ```
 
-如果需要 OpenAlex 以外的通用网页搜索，可按需配置 Tavily、SerpAPI、Brave、Bing、Bocha 或自定义 provider。
+OpenAlex 与通用网页检索是独立可选能力。未配置通用网页检索时，系统仍可使用本地论文库与 OpenAlex，并会披露网页能力不可用。
 
-### 2. 使用 Docker Compose 启动
+### 2. 日常启动：复用已有依赖
 
-```bash
+先确认现有镜像与前端依赖：
+
+```powershell
+Set-Location D:\agent\agentic_rag_project-main2
+docker compose ps
+docker image inspect agentic-rag-project-main2-runtime:latest
+Test-Path .\web\node_modules
+```
+
+启动顺序必须将 API 与 worker 分开，避免历史 Docker 端口错绑：
+
+```powershell
+docker compose up -d --no-build redis rabbitmq postgres
+docker compose up -d --no-build api
+docker compose up -d --no-build ingestion-worker
+
+Set-Location .\web
+npm run dev -- --host 0.0.0.0 --port 5174
+```
+
+存在镜像和 `node_modules` 时，不要执行 `docker compose build`、`docker compose up --build`、`npm install` 或 `npm ci`。只有确认对应依赖不存在时，才进行首次构建或下载。
+
+### 3. 访问与检查
+
+| 服务 | 地址 |
+|---|---|
+| React 前端 | `http://localhost:5174/` |
+| FastAPI | `http://localhost:8059/` |
+| API 存活检查 | `http://localhost:8059/health/live` |
+| PostgreSQL / pgvector | `localhost:6544` |
+| RabbitMQ 管理界面 | `http://localhost:15672/` |
+
+```powershell
+Invoke-WebRequest http://localhost:5174/ -UseBasicParsing
+Invoke-WebRequest http://localhost:8059/health/live -UseBasicParsing
+docker compose ps
+docker compose logs --tail=20 ingestion-worker
+```
+
+预期前端与 API 均返回 HTTP `200`；API 绑定 `8059:8888`，worker 不暴露宿主机端口。
+
+### 4. 首次部署：干净机器从零启动
+
+首次从 GitHub 克隆后，不需要预先安装 Python 或 Node.js；Docker Compose 会从仓库中的 `Dockerfile` 和锁定的 `web/package-lock.json` 构建运行环境。复制 `.env.example` 并填入真实模型配置后执行：
+
+```powershell
+Set-Location <cloned-repository>
+Copy-Item .env.example .env
+# 编辑 .env，至少填写 OPENAI_API_KEY、OPENAI_BASE_URL、LLM_CHOICE、EMBEDDING_MODEL。
+
+docker compose build api web
 docker compose up -d
 ```
 
-默认会启动：
+API 与 ingestion worker 始终共用 `agentic-rag-project-main2-runtime:latest`：先构建 `api`，再由 worker 复用该镜像，不会创建第二套 Python、Torch 或 Docling 依赖。首次运行会下载镜像层和 Docling/Hugging Face 所需模型；后续保留 `agentic_rag_project-main2_huggingface_cache_main2` 卷即可复用缓存。
 
-- PostgreSQL + pgvector；
-- FastAPI backend；
-- Streamlit UI；
-- Redis；
-- RabbitMQ；
-- ingestion worker。
+`docker-compose.dev.yml` 仅用于需要源码挂载和 API 热重载的本地开发，不会在普通部署中自动生效：
 
-如果只想复用已有容器，不希望重建镜像，可以使用：
-
-```bash
-docker compose up -d --no-build
-```
-
-### 3. 访问服务
-
-```text
-Streamlit UI: http://localhost:8501
-FastAPI Docs: http://localhost:8000/docs
-RabbitMQ UI: http://localhost:15672
-```
-
-### 4. 常用健康检查
-
-```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/readiness
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 ```
 
 ---
 
-## 🧪 测试与评测
+## 🧪 评测结果
 
-项目包含核心单元测试、真实链路测评和工程化展示测评，用于回归检查入库、检索、来源边界、检索恢复、中间件、缓存降级和多轮记忆等关键链路。
+以下结果来自当前已完成的 **46 篇 RRT 及相关路径规划论文库** 与真实运行链路；它们描述本地语料、检索与功能契约，不等同于开放域问答 benchmark。
 
-```bash
-# 核心 Agent / runtime / middleware 测试
-.venv\Scripts\python.exe -m pytest tests\agent\test_evidence_citation_runtime.py tests\agent\test_agent_langgraph_retrieval_loop.py tests\agent\test_langgraph_analysis_context.py tests\agent\test_answer_review_runtime.py tests\agent\test_http_runtime.py tests\agent\test_runtime_config.py tests\agent\test_memory_runtime.py tests\agent\test_dialog_policy.py tests\agent\test_prompt_registry.py tests\agent\test_simple_chat_runtime.py -q
+### 入库与图谱
 
-# 真实链路展示报告
-python evals/run_real_chain_eval.py
+| 指标 | 结果 |
+|---|---:|
+| 已入库论文 | 46 |
+| 结构化检索片段 | 5,467 |
+| 章节 metadata 覆盖率 | 100% |
+| 行号 metadata 覆盖率 | 100% |
+| Artifact evidence | 1,204 |
+| 图 / 表 / 算法伪代码 | 879 / 69 / 256 |
+| 知识星图节点中文卡片 | 46 / 46 |
+| 关系边 | 430 |
 
-# 工程化展示测评
-python evals/run_engineering_showcase_eval.py
+### 检索与问答链路
+
+| 评测 | 结果 | 说明 |
+|---|---:|---|
+| 中文专家金标检索 Hit@5 | 100%（12 题） | 中文问题经中英双路检索定位英文论文库 |
+| 中文专家金标 MRR@5 | 0.958 | 文档、章节提示与关键词召回同时核验 |
+| 中文检索 P50 / P90 | 692 / 731 ms | 缓存命中下的实际评测时延 |
+| 端到端问答契约 | 100 / 100 | 单篇、章节、图表、算法、实验、图谱、OpenAlex、网页边界与直接回答均通过契约校验 |
+| 翻译缓存 | 首次 1.75 s，缓存 0.001 s | 选区翻译、全文 profile 与 RRT 术语保留已验证 |
+
+问答契约要求正确来源路由、目标论文覆盖、来源字段结构有效、非空回答以及相应来源边界；它不宣称替代独立人工对开放式答案质量的评审。
+
+详细报告：
+
+- [46 篇论文库评测说明](docs/CORPUS_EVALUATION_46.md)
+- 100 题端到端评测的原始 JSON 与运行报告保留为本地运行产物，不随仓库提交；README 仅展示其可复核汇总口径。
+- [评测套件说明](evals/README.md)
+
+### 运行评测
+
+优先在 API 容器中执行，以复用已安装的 Docling、数据库与模型依赖：
+
+```powershell
+Set-Location D:\agent\agentic_rag_project-main2
+
+# 入库结构质量
+docker compose exec -T api python evals/run_ingestion_quality_eval.py --output-dir evals/results/corpus_46
+
+# 46 篇论文库已知标题定位
+docker compose exec -T api python evals/run_corpus_readiness_eval.py --api-url http://localhost:8888 --output-dir evals/results/corpus_46
+
+# 工程测试（使用包含测试依赖的本地虚拟环境）
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
-当前报告位于 `evals/results/real_chain_eval.md` 和 `evals/results/engineering_showcase_eval.md`。详细设计见 [docs/EVALUATION.md](docs/EVALUATION.md) 与 [evals/README.md](evals/README.md)。
-
-涉及 PDF 解析和完整入库的链路推荐使用 Docker 环境验证，便于复现 Docling、torch 和系统依赖。
+若本地虚拟环境未安装测试依赖，请先按 `pyproject.toml` 安装；运行时 API 镜像以服务依赖为目标，默认不保证携带 `pytest`。
 
 ---
 
@@ -354,65 +355,46 @@ python evals/run_engineering_showcase_eval.py
 ```text
 agentic_rag_project-main2/
 ├── agent/
-│   ├── agent_langgraph.py              # LangGraph 深度分析主工作流
-│   ├── intent_planner.py               # Source-aware intent planning
-│   ├── planner_runtime.py              # Planner 运行时与 fallback
-│   ├── tools.py                        # 本地检索、OpenAlex、Web 等工具入口
-│   ├── tool_specs.py                   # 工具协议与 capability 描述
-│   ├── history_resolver.py             # 多轮问题补全
-│   ├── dialog_policy.py                # 对话策略与轻重链路选择
-│   ├── memory_runtime.py               # 会话记忆压缩与快照
-│   ├── simple_chat_runtime.py          # 非检索问题轻量回答路径
-│   ├── answer_review_runtime.py        # 回答证据风险审查
-│   ├── evidence_citation_runtime.py    # evidence 引用构建与引用审查
-│   ├── evidence_support_policy.py       # 引用事实与证据片段的一致性检查
-│   ├── prompt_registry.py              # Prompt registry 与兼容层
-│   ├── rabbitmq_producer.py            # 异步入库任务投递
-│   ├── ingestion_worker.py             # RabbitMQ worker 消费与入库
-│   ├── cache_utils.py                  # Redis query embedding cache
-│   ├── http_middleware.py              # 请求中间件、限流、安全头
-│   ├── runtime_metrics.py              # 运行时指标
-│   ├── health_runtime.py               # health/readiness 组件检查
-│   └── api.py                          # FastAPI API 层
+│   ├── api.py                         # FastAPI、SSE 与产品 API
+│   ├── agent_langgraph.py             # 深度分析工作流
+│   ├── intent_planner.py              # 意图、来源和检索路由策略
+│   ├── tools.py                       # 本地、章节、artifact、OpenAlex、Web 工具
+│   ├── graph_*.py                     # 星图 schema、关系、中文本地化与运行时
+│   ├── selection_translation_runtime.py # 全文术语 profile 与选区翻译缓存
+│   ├── ingestion_*.py                 # 入库任务、额度与 worker
+│   ├── evidence_*.py                  # 证据引用与支撑审查
+│   └── memory_*.py                    # 会话记忆运行时
 ├── ingestion/
-│   ├── ingest.py                       # PDF 入库主流程
-│   ├── extract_files.py                # Docling PDF 解析
-│   └── chunking.py                     # section-aware chunking
-├── ui/
-│   └── streamlit_app.py                # Streamlit 研究工作台
-├── evals/
-│   ├── run_all_evals.py
-│   ├── run_ingestion_quality_eval.py
-│   ├── run_sample_ingestion_eval.py
-│   ├── run_source_policy_eval.py
-│   ├── run_retrieval_quality_eval.py
-│   ├── run_retrieval_loop_recovery_eval.py
-│   └── run_answer_groundedness_eval.py
+│   ├── extract_files.py               # Docling / PDFium 内容解析
+│   ├── chunker.py                     # 章节感知切块与 artifact 处理
+│   ├── ingest.py                      # 入库管线与视觉分析适配
+│   └── title_parser.py                # 论文标题解析
+├── web/
+│   └── src/
+│       ├── App.jsx                    # 研究工作台、对话、资料库与任务页
+│       ├── Reader.jsx                 # PDF 阅读、划词翻译与批注
+│       └── PaperGraph.jsx             # Three.js 3D 知识星图
 ├── docs/
-│   ├── DESIGN.md
-│   ├── EVALUATION.md
-│   ├── RABBITMQ_ASYNC_INGESTION.md
-│   └── REDIS_CACHE.md
-├── tests/
-│   ├── agent/
-│   ├── ingestion/
-│   └── evals/
-├── sql/
+│   ├── assets/                        # README 界面截图
+│   ├── DESIGN.md                      # 设计说明
+│   ├── CORPUS_EVALUATION_46.md        # 论文库评测口径
+│   └── PROJECT_BRIEF.md               # 项目概要
+├── evals/                             # 评测脚本、金标与本地产物
+├── tests/                             # 单元与运行时测试
+├── sql/                               # 数据库 schema
 ├── docker-compose.yml
-├── Dockerfile
 └── README.md
 ```
 
 ---
 
-## 🧭 Roadmap
+## 🧭 后续方向
 
-- 增强 PDF 页码级 evidence 映射，让回答引用可以进一步定位到原文页面。
-- 完善异步入库任务的进度展示、失败重试和批量任务管理。
-- 扩展多文档对比、related work 分析和结构化论文卡片导出能力。
-- 补充更完整的端到端评测数据集，覆盖论文总结、方法对比、实验指标检索和多轮追问场景。
-
----
+- 页码级、图号级证据定位与引用展示；
+- 对低置信度标题进行用户确认与规范化，改善资料库、星图缩写和标题检索；
+- 更细粒度的 artifact context 切分，减少过长表格 chunk；
+- 更多跨领域论文语料和人工金标开放式问答评测；
+- 可导出的研究脉络、方法对比与创新假设报告。
 
 ## 📄 License
 

@@ -67,9 +67,8 @@ def _resolve_rate_limit_rule(request: Request) -> Optional[Tuple[str, int, int]]
 
     chat_paths = {"/chat", "/chat/stream"}
     upload_paths = {
-        "/documents/upload",
-        "/documents/upload/start",
         "/ingestion/tasks",
+        "/ingestion/task-batches",
         "/openalex/add-to-kb",
     }
     if request.url.path in chat_paths:
@@ -98,9 +97,8 @@ def _resolve_request_size_limit(request: Request) -> Optional[Tuple[str, int]]:
         )
 
     if request.url.path in {
-        "/documents/upload",
-        "/documents/upload/start",
         "/ingestion/tasks",
+        "/ingestion/task-batches",
         "/openalex/add-to-kb",
     }:
         return (

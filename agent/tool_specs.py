@@ -12,6 +12,8 @@ TOOL_SPECS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "query": {"type": "string"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                "document_ids": {"type": "array", "items": {"type": "string"}},
+                "embedding_language": {"type": "string", "enum": ["zh", "en"]},
             },
             "required": ["query"],
         },
@@ -27,6 +29,8 @@ TOOL_SPECS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "query": {"type": "string"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                "document_ids": {"type": "array", "items": {"type": "string"}},
+                "embedding_language": {"type": "string", "enum": ["zh", "en"]},
             },
             "required": ["query"],
         },
@@ -43,6 +47,7 @@ TOOL_SPECS: Dict[str, Dict[str, Any]] = {
                 "query": {"type": "string"},
                 "section_query": {"type": "string"},
                 "document_id": {"type": "string"},
+                "document_ids": {"type": "array", "items": {"type": "string"}},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20},
             },
             "required": ["query"],
@@ -67,6 +72,8 @@ TOOL_SPECS: Dict[str, Dict[str, Any]] = {
                     },
                 },
                 "document_id": {"type": "string"},
+                "document_ids": {"type": "array", "items": {"type": "string"}},
+                "embedding_language": {"type": "string", "enum": ["zh", "en"]},
             },
             "required": ["query"],
         },
@@ -210,6 +217,9 @@ def validate_tool_arguments(name: str, arguments: Dict[str, Any]) -> Tuple[bool,
             return False, f"invalid_type:{key}"
         if expected_type == "string" and isinstance(value, str) and not value.strip() and key in required:
             return False, f"empty_string:{key}"
+        allowed_values = set(prop.get("enum") or [])
+        if allowed_values and value not in allowed_values:
+            return False, f"invalid_enum:{key}"
         if expected_type in {"integer", "number"} and value is not None:
             minimum = prop.get("minimum")
             maximum = prop.get("maximum")

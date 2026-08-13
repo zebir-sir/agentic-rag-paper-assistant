@@ -18,7 +18,7 @@ def _local_sources() -> list[dict]:
     ]
 
 
-def test_review_generated_answer_appends_caveat_for_unsupported_numeric_claim():
+def test_review_generated_answer_records_risk_without_appending_a_chat_caveat():
     result = review_generated_answer(
         answer="实验表明该方法在 2024 年数据集上提升了 17.3% 的成功率。",
         sources=_local_sources(),
@@ -26,12 +26,12 @@ def test_review_generated_answer_appends_caveat_for_unsupported_numeric_claim():
     )
 
     assert result.reviewed is True
-    assert result.review_action == "append_caveat"
+    assert result.review_action == "retain_with_metadata"
     assert result.unsupported_claim_risk == 2
-    assert "仍需回到原文进一步确认" in result.revised_answer
+    assert result.revised_answer == "实验表明该方法在 2024 年数据集上提升了 17.3% 的成功率。"
 
 
-def test_review_generated_answer_keeps_existing_caveat():
+def test_review_generated_answer_keeps_existing_chat_content_unchanged():
     result = review_generated_answer(
         answer=(
             "实验表明该方法在 2024 年数据集上提升了 17.3% 的成功率。\n\n"
@@ -42,7 +42,7 @@ def test_review_generated_answer_keeps_existing_caveat():
     )
 
     assert result.reviewed is True
-    assert result.review_action == "keep_existing_caveat"
+    assert result.review_action == "retain_with_metadata"
     assert result.revised_answer.count("仍需回到原文进一步确认") == 1
 
 

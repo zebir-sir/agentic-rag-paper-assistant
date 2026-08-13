@@ -57,3 +57,19 @@ async def test_submit_ingestion_task_returns_queued():
         resp = await submit_ingestion_task({"filename": "paper.pdf", "content_base64": "abc"})
         assert resp.task_id == "task-queued"
         assert resp.status == "queued"
+
+
+@pytest.mark.asyncio
+async def test_get_ingestion_task_endpoint_exposes_queue_progress_fields():
+    with patch("agent.api.get_ingestion_task", new_callable=AsyncMock) as mock_get_task:
+        mock_get_task.return_value = {
+            "task_id": "task-progress", "document_id": None, "file_path": "/tmp/paper.pdf",
+            "filename": "paper.pdf", "fast": False, "status": "processing", "queue_order": 4,
+            "progress_percent": 65, "progress_stage": "正在生成检索向量", "error_message": None,
+            "retry_count": 0, "created_at": "2026-05-16T00:00:00+00:00",
+            "updated_at": "2026-05-16T00:00:00+00:00", "started_at": None, "finished_at": None,
+        }
+        response = await get_ingestion_task_endpoint("task-progress")
+    assert response.filename == "paper.pdf"
+    assert response.queue_order == 4
+    assert response.progress_percent == 65

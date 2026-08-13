@@ -49,6 +49,7 @@ async def test_generate_embedding_cache_miss_calls_provider_and_sets_cache(monke
 
     monkeypatch.setattr(tools, "cache_get_json", fake_cache_get)
     monkeypatch.setattr(tools, "cache_set_json", fake_cache_set)
+    monkeypatch.setattr(tools, "EMBEDDING_MODEL", "text-embedding-3-small")
     monkeypatch.setattr(tools, "embedding_client", SimpleNamespace(embeddings=DummyEmbeddings()))
     monkeypatch.setenv("ENABLE_REDIS_CACHE", "true")
 

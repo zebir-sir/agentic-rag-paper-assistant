@@ -80,22 +80,12 @@ async def close_database():
 
 async def execute_init_sql(sql_path: str):
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT EXISTS (
-                SELECT 1
-                FROM information_schema.tables
-                WHERE table_name = 'documents'
-            ) AS exists
-        """)
-        
-        if row["exists"]:
-            logger.info("Schema already initialized, skipping.")
-            return
-
-        with open(sql_path, 'r') as file:
+        # schema.sql only contains idempotent DDL and is also our migration path.
+        # Do not skip it merely because the original documents table already exists.
+        with open(sql_path, "r", encoding="utf-8") as file:
             sql = file.read()
-            await conn.execute(sql)
-            logger.info("Schema created successfully.")
+        await conn.execute(sql)
+        logger.info("Schema ensured successfully.")
 
 # 会话管理函数
 async def create_session(
@@ -120,10 +110,6 @@ async def create_session(
             "title": "New Chat",
             "title_generated": False,
             "last_message_at": None,
-            "latest_summary": "",
-            "compression_count": 0,
-            "compacted_message_count": 0,
-            "summary_updated_at": None,
             **(metadata or {})
         }
         
@@ -214,41 +200,49 @@ async def update_session_metadata(
         return result != "UPDATE 0"
 
 
-async def get_session_memory_metadata(session_id: str) -> Dict[str, Any]:
-    """Read memory-related metadata fields for a session."""
-    session = await get_session(session_id)
-    if not session:
+async def get_session_memory_snapshot(session_id: str) -> Dict[str, Any]:
+    """Read the structured session snapshot; messages remain the immutable source log."""
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT version, covered_message_count, summary, updated_at
+               FROM session_memory_snapshots WHERE session_id=$1::uuid""",
+            session_id,
+        )
+        if not row:
+            return {"version": 0, "covered_message_count": 0, "summary": {}, "updated_at": None}
         return {
-            "latest_summary": "",
-            "compression_count": 0,
-            "compacted_message_count": 0,
-            "summary_updated_at": None,
+            "version": int(row["version"]),
+            "covered_message_count": int(row["covered_message_count"]),
+            "summary": json.loads(row["summary"]) if isinstance(row["summary"], str) else dict(row["summary"] or {}),
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
         }
 
-    metadata = session.get("metadata") or {}
-    return {
-        "latest_summary": str(metadata.get("latest_summary") or ""),
-        "compression_count": int(metadata.get("compression_count") or 0),
-        "compacted_message_count": int(metadata.get("compacted_message_count") or 0),
-        "summary_updated_at": metadata.get("summary_updated_at"),
-    }
 
-
-async def update_session_memory_metadata(
+async def save_session_memory_snapshot(
     session_id: str,
-    latest_summary: str,
-    compression_count: int,
-    compacted_message_count: int,
-    summary_updated_at: Optional[str] = None,
-) -> bool:
-    """Merge memory metadata into existing session metadata."""
-    updates = {
-        "latest_summary": latest_summary,
-        "compression_count": compression_count,
-        "compacted_message_count": compacted_message_count,
-        "summary_updated_at": summary_updated_at or datetime.now(timezone.utc).isoformat(),
-    }
-    return await update_session_metadata(session_id, updates)
+    covered_message_count: int,
+    summary: Dict[str, Any],
+) -> Dict[str, Any]:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO session_memory_snapshots(session_id, version, covered_message_count, summary)
+               VALUES ($1::uuid, 1, $2, $3::jsonb)
+               ON CONFLICT (session_id) DO UPDATE SET
+                   version=session_memory_snapshots.version + 1,
+                   covered_message_count=EXCLUDED.covered_message_count,
+                   summary=EXCLUDED.summary,
+                   updated_at=CURRENT_TIMESTAMP
+               RETURNING version, covered_message_count, summary, updated_at""",
+            session_id,
+            max(0, int(covered_message_count)),
+            json.dumps(summary, ensure_ascii=False),
+        )
+        return {
+            "version": int(row["version"]),
+            "covered_message_count": int(row["covered_message_count"]),
+            "summary": json.loads(row["summary"]) if isinstance(row["summary"], str) else dict(row["summary"] or {}),
+            "updated_at": row["updated_at"].isoformat(),
+        }
 
 
 async def refresh_session_metadata(session_id: str) -> None:
@@ -422,6 +416,18 @@ async def add_message(
         
         return result["id"]
 
+
+async def set_message_memory_eligible(message_id: str) -> bool:
+    """Promote a persisted final turn into the memory white list after successful completion."""
+    async with db_pool.acquire() as conn:
+        result = await conn.execute(
+            """UPDATE messages
+               SET metadata = COALESCE(metadata, '{}'::jsonb) || '{"memory_eligible": true}'::jsonb
+               WHERE id=$1::uuid""",
+            message_id,
+        )
+        return result != "UPDATE 0"
+
 async def get_session_messages(
     session_id: str,
     limit: Optional[int] = None
@@ -507,6 +513,136 @@ async def get_document(document_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+async def get_document_pdf(document_id: str) -> Optional[Dict[str, Any]]:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT pdf_blob, pdf_media_type FROM documents WHERE id = $1::uuid", document_id
+        )
+        if not row or row["pdf_blob"] is None:
+            return None
+        return {"content": bytes(row["pdf_blob"]), "media_type": str(row["pdf_media_type"] or "application/pdf")}
+
+
+async def get_document_pdf_bytes(document_id: str) -> Optional[bytes]:
+    pdf = await get_document_pdf(document_id)
+    return pdf["content"] if pdf else None
+
+
+async def delete_document(document_id: str) -> bool:
+    """Delete one paper and all dependent chunks, artifacts, translations and annotations."""
+    async with db_pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM documents WHERE id = $1::uuid", document_id)
+        return result != "DELETE 0"
+
+
+async def get_document_translation(document_id: str, target_language: str, source_sha256: str) -> Optional[Dict[str, Any]]:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT id::text, document_id::text, target_language, content_markdown, model, updated_at
+               FROM document_translations WHERE document_id=$1::uuid AND target_language=$2 AND source_sha256=$3""",
+            document_id, target_language, source_sha256,
+        )
+        if not row:
+            return None
+        return {"id": row["id"], "document_id": row["document_id"], "target_language": row["target_language"], "content_markdown": row["content_markdown"], "model": row["model"], "updated_at": row["updated_at"].isoformat()}
+
+
+async def save_document_translation(*, document_id: str, target_language: str, source_sha256: str, content_markdown: str, model: str) -> Dict[str, Any]:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO document_translations (document_id,target_language,source_sha256,content_markdown,model)
+               VALUES ($1::uuid,$2,$3,$4,$5)
+               ON CONFLICT (document_id,target_language,source_sha256) DO UPDATE
+               SET content_markdown=EXCLUDED.content_markdown, model=EXCLUDED.model, updated_at=CURRENT_TIMESTAMP
+               RETURNING id::text, document_id::text, target_language, content_markdown, model, updated_at""",
+            document_id, target_language, source_sha256, content_markdown, model,
+        )
+        return {"id": row["id"], "document_id": row["document_id"], "target_language": row["target_language"], "content_markdown": row["content_markdown"], "model": row["model"], "updated_at": row["updated_at"].isoformat()}
+
+
+async def get_translation_profile(document_id: str, target_language: str, source_sha256: str) -> Optional[Dict[str, Any]]:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT profile_json, model, updated_at FROM document_translation_profiles
+               WHERE document_id=$1::uuid AND target_language=$2 AND source_sha256=$3""",
+            document_id, target_language, source_sha256,
+        )
+    if not row:
+        return None
+    profile = row["profile_json"] if isinstance(row["profile_json"], dict) else json.loads(row["profile_json"] or "{}")
+    return {"profile": profile, "model": row["model"], "updated_at": row["updated_at"].isoformat()}
+
+
+async def save_translation_profile(*, document_id: str, target_language: str, source_sha256: str, profile: Dict[str, Any], model: str) -> Dict[str, Any]:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO document_translation_profiles(document_id,target_language,source_sha256,profile_json,model)
+               VALUES($1::uuid,$2,$3,$4::jsonb,$5)
+               ON CONFLICT (document_id,target_language,source_sha256) DO UPDATE
+               SET profile_json=EXCLUDED.profile_json, model=EXCLUDED.model, updated_at=CURRENT_TIMESTAMP
+               RETURNING profile_json, model, updated_at""",
+            document_id, target_language, source_sha256, json.dumps(profile, ensure_ascii=False), model,
+        )
+    return {"profile": row["profile_json"], "model": row["model"], "updated_at": row["updated_at"].isoformat()}
+
+
+async def get_selection_translation(document_id: str, target_language: str, source_sha256: str, selection_sha256: str) -> Optional[Dict[str, Any]]:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT id::text, source_text, translated_text, model, updated_at FROM document_selection_translations
+               WHERE document_id=$1::uuid AND target_language=$2 AND source_sha256=$3 AND selection_sha256=$4""",
+            document_id, target_language, source_sha256, selection_sha256,
+        )
+    return dict(row) if row else None
+
+
+async def save_selection_translation(*, document_id: str, target_language: str, source_sha256: str, selection_sha256: str, source_text: str, translated_text: str, context_before: str, context_after: str, model: str) -> Dict[str, Any]:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO document_selection_translations(document_id,target_language,source_sha256,selection_sha256,source_text,translated_text,context_before,context_after,model)
+               VALUES($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9)
+               ON CONFLICT (document_id,target_language,source_sha256,selection_sha256) DO UPDATE
+               SET translated_text=EXCLUDED.translated_text, context_before=EXCLUDED.context_before, context_after=EXCLUDED.context_after, model=EXCLUDED.model, updated_at=CURRENT_TIMESTAMP
+               RETURNING id::text, source_text, translated_text, model, updated_at""",
+            document_id, target_language, source_sha256, selection_sha256, source_text, translated_text, context_before, context_after, model,
+        )
+    return dict(row)
+
+
+async def list_document_annotations(document_id: str) -> List[Dict[str, Any]]:
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT id::text, page_number, page_x, page_y, quote, note, color, created_at, updated_at FROM document_annotations WHERE document_id=$1::uuid ORDER BY created_at", document_id)
+        return [{"id": r["id"], "page_number": r["page_number"], "page_x": float(r["page_x"]), "page_y": float(r["page_y"]), "quote": r["quote"], "note": r["note"], "color": r["color"], "created_at": r["created_at"].isoformat(), "updated_at": r["updated_at"].isoformat()} for r in rows]
+
+
+async def create_document_annotation(document_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async with db_pool.acquire() as conn:
+        page_x = min(1.0, max(0.0, float(payload.get("page_x", 0.5))))
+        page_y = min(1.0, max(0.0, float(payload.get("page_y", 0.5))))
+        row = await conn.fetchrow("""INSERT INTO document_annotations(document_id,page_number,page_x,page_y,quote,note,color) VALUES($1::uuid,$2,$3,$4,$5,$6,$7) RETURNING id::text,page_number,page_x,page_y,quote,note,color,created_at,updated_at""", document_id, payload.get("page_number"), page_x, page_y, str(payload.get("quote") or ""), str(payload.get("note") or "").strip(), str(payload.get("color") or "yellow"))
+        return {"id": row["id"], "page_number": row["page_number"], "page_x": float(row["page_x"]), "page_y": float(row["page_y"]), "quote": row["quote"], "note": row["note"], "color": row["color"], "created_at": row["created_at"].isoformat(), "updated_at": row["updated_at"].isoformat()}
+
+
+async def update_document_annotation_position(document_id: str, annotation_id: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    page_x = min(1.0, max(0.0, float(payload.get("page_x", 0.5))))
+    page_y = min(1.0, max(0.0, float(payload.get("page_y", 0.5))))
+    note = payload.get("note")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("""UPDATE document_annotations SET page_number=COALESCE($3,page_number), page_x=$4, page_y=$5,
+                                   note=COALESCE($6,note), updated_at=CURRENT_TIMESTAMP
+                                   WHERE id=$1::uuid AND document_id=$2::uuid
+                                   RETURNING id::text,page_number,page_x,page_y,quote,note,color,created_at,updated_at""", annotation_id, document_id, payload.get("page_number"), page_x, page_y, str(note).strip() if note is not None else None)
+        if not row:
+            return None
+        return {"id": row["id"], "page_number": row["page_number"], "page_x": float(row["page_x"]), "page_y": float(row["page_y"]), "quote": row["quote"], "note": row["note"], "color": row["color"], "created_at": row["created_at"].isoformat(), "updated_at": row["updated_at"].isoformat()}
+
+
+async def delete_document_annotation(document_id: str, annotation_id: str) -> bool:
+    async with db_pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM document_annotations WHERE id=$1::uuid AND document_id=$2::uuid", annotation_id, document_id)
+        return result != "DELETE 0"
+
+
 async def list_documents(
     limit: int = 100,
     offset: int = 0,
@@ -573,7 +709,9 @@ async def list_documents(
 # 向量搜索函数
 async def vector_search(
     embedding: List[float],
-    limit: int = 10
+    limit: int = 10,
+    embedding_language: Optional[str] = None,
+    document_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     执行向量相似度搜索。
@@ -587,11 +725,30 @@ async def vector_search(
     """
     async with db_pool.acquire() as conn:
         embedding_str = '[' + ','.join(map(str, embedding)) + ']'
-        results = await conn.fetch(
-            "SELECT * FROM match_chunks($1::vector, $2)",
-            embedding_str,
-            limit
-        )
+        normalized_document_ids = list(dict.fromkeys(str(value).strip() for value in (document_ids or []) if str(value).strip()))
+        if embedding_language or normalized_document_ids:
+            conditions = ["c.embedding IS NOT NULL"]
+            params: List[Any] = [embedding_str]
+            if embedding_language:
+                conditions.append(f"c.metadata->>'embedding_language' = ${len(params) + 1}")
+                params.append(embedding_language)
+            if normalized_document_ids:
+                conditions.append(f"c.document_id = ANY(${len(params) + 1}::uuid[])")
+                params.append(normalized_document_ids)
+            params.append(limit)
+            results = await conn.fetch(
+                f"""
+                SELECT c.id::text AS chunk_id, c.document_id::text AS document_id, c.content,
+                       (1 - (c.embedding <=> $1::vector))::double precision AS similarity,
+                       c.metadata, d.title AS document_title, d.source AS document_source
+                FROM chunks c JOIN documents d ON d.id = c.document_id
+                WHERE {' AND '.join(conditions)}
+                ORDER BY c.embedding <=> $1::vector LIMIT ${len(params)}
+                """,
+                *params,
+            )
+        else:
+            results = await conn.fetch("SELECT * FROM match_chunks($1::vector, $2)", embedding_str, limit)
         
         return [
             {
@@ -610,7 +767,9 @@ async def hybrid_search(
     embedding: List[float],
     query_text: str,
     limit: int = 10,
-    text_weight: float = 0.3
+    text_weight: float = 0.3,
+    embedding_language: Optional[str] = None,
+    document_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     执行混合搜索（向量 + 关键词）。
@@ -627,13 +786,37 @@ async def hybrid_search(
     async with db_pool.acquire() as conn:
         embedding_str = '[' + ','.join(map(str, embedding)) + ']'
         
-        results = await conn.fetch(
-            "SELECT * FROM hybrid_search($1::vector, $2, $3, $4)",
-            embedding_str,
-            query_text,
-            limit,
-            text_weight
-        )
+        normalized_document_ids = list(dict.fromkeys(str(value).strip() for value in (document_ids or []) if str(value).strip()))
+        if embedding_language or normalized_document_ids:
+            safe_text_weight = max(0.0, min(float(text_weight), 1.0))
+            vector_weight = 1.0 - safe_text_weight
+            conditions = ["c.embedding IS NOT NULL"]
+            params: List[Any] = [embedding_str, query_text]
+            if embedding_language:
+                conditions.append(f"c.metadata->>'embedding_language' = ${len(params) + 1}")
+                params.append(embedding_language)
+            if normalized_document_ids:
+                conditions.append(f"c.document_id = ANY(${len(params) + 1}::uuid[])")
+                params.append(normalized_document_ids)
+            params.append(limit)
+            results = await conn.fetch(
+                f"""
+                SELECT c.id::text AS chunk_id, c.document_id::text AS document_id, c.content,
+                       ({vector_weight} * GREATEST(0.0, 1 - (c.embedding <=> $1::vector)) + {safe_text_weight} *
+                        ts_rank_cd(to_tsvector('simple', c.content), plainto_tsquery('simple', $2)))::float8 AS combined_score,
+                       GREATEST(0.0, 1 - (c.embedding <=> $1::vector))::float8 AS vector_similarity,
+                       ts_rank_cd(to_tsvector('simple', c.content), plainto_tsquery('simple', $2))::float8 AS text_similarity,
+                       c.metadata, d.title AS document_title, d.source AS document_source
+                FROM chunks c JOIN documents d ON d.id = c.document_id
+                WHERE {' AND '.join(conditions)}
+                ORDER BY combined_score DESC LIMIT ${len(params)}
+                """,
+                *params,
+            )
+        else:
+            results = await conn.fetch(
+                "SELECT * FROM hybrid_search($1::vector, $2, $3, $4)", embedding_str, query_text, limit, text_weight
+            )
         
         return [
             {
@@ -655,6 +838,7 @@ async def section_search(
     query_text: str,
     limit: int = 10,
     document_id: Optional[str] = None,
+    document_ids: Optional[List[str]] = None,
     section_query: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
@@ -698,6 +882,12 @@ async def section_search(
             conditions.append(f"d.id = ${idx}::uuid")
             params.append(document_id)
             idx += 1
+        elif document_ids:
+            normalized_document_ids = list(dict.fromkeys(str(value).strip() for value in document_ids if str(value).strip()))
+            if normalized_document_ids:
+                conditions.append(f"d.id = ANY(${idx}::uuid[])")
+                params.append(normalized_document_ids)
+                idx += 1
 
         score_param_idx: Optional[int] = None
         if query_value and not section_value:
@@ -789,7 +979,9 @@ async def artifact_search(
     limit: int = 10,
     artifact_types: Optional[List[str]] = None,
     document_id: Optional[str] = None,
+    document_ids: Optional[List[str]] = None,
     text_weight: float = 0.3,
+    embedding_language: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Search only artifact chunks (table/figure/algorithm) with vector + text relevance.
@@ -820,6 +1012,17 @@ async def artifact_search(
         if document_id:
             conditions.append(f"d.id = ${idx}::uuid")
             params.append(document_id)
+            idx += 1
+        elif document_ids:
+            normalized_document_ids = list(dict.fromkeys(str(value).strip() for value in document_ids if str(value).strip()))
+            if normalized_document_ids:
+                conditions.append(f"d.id = ANY(${idx}::uuid[])")
+                params.append(normalized_document_ids)
+                idx += 1
+
+        if embedding_language:
+            conditions.append(f"COALESCE(c.metadata->>'embedding_language','') = ${idx}")
+            params.append(embedding_language)
             idx += 1
 
         where_sql = " AND ".join(conditions)
@@ -898,6 +1101,63 @@ async def artifact_search(
                 }
             )
         return out
+
+
+async def get_artifact(artifact_id: str) -> Optional[Dict[str, Any]]:
+    """Load a complete figure/table evidence record without exposing its binary payload."""
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT a.id::text, a.document_id::text, a.artifact_type, a.caption, a.page_number,
+                   a.section_path, a.context_before, a.context_after, a.raw_content,
+                   a.structured_data, a.retrieval_text, a.image_media_type,
+                   (a.image_blob IS NOT NULL) AS has_image, d.title AS document_title
+            FROM artifacts a
+            JOIN documents d ON d.id = a.document_id
+            WHERE a.id = $1::uuid
+            """,
+            artifact_id,
+        )
+        if not row:
+            return None
+        structured_data = row["structured_data"]
+        if isinstance(structured_data, str):
+            structured_data = json.loads(structured_data or "{}")
+        return {
+            "id": row["id"],
+            "document_id": row["document_id"],
+            "document_title": row["document_title"],
+            "artifact_type": row["artifact_type"],
+            "caption": row["caption"],
+            "page_number": row["page_number"],
+            "section_path": row["section_path"],
+            "context_before": row["context_before"],
+            "context_after": row["context_after"],
+            "raw_content": row["raw_content"],
+            "structured_data": dict(structured_data or {}),
+            "retrieval_text": row["retrieval_text"],
+            "has_image": bool(row["has_image"]),
+            "image_media_type": row["image_media_type"],
+        }
+
+
+async def get_artifact_image(artifact_id: str) -> Optional[Dict[str, Any]]:
+    """Load the original image bytes for a figure evidence record."""
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT image_blob, image_media_type
+            FROM artifacts
+            WHERE id = $1::uuid AND artifact_type = 'figure' AND image_blob IS NOT NULL
+            """,
+            artifact_id,
+        )
+        if not row:
+            return None
+        return {
+            "content": bytes(row["image_blob"]),
+            "media_type": str(row["image_media_type"] or "image/png"),
+        }
 
 # 分块管理函数
 async def get_document_chunks(document_id: str) -> List[Dict[str, Any]]:

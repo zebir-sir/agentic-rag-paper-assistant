@@ -7,7 +7,6 @@ from typing import List
 from .agent_runtime import AgentDependencies
 from .langchain_tools import build_langchain_tools
 from .models import EvidenceSource
-from .openalex_router import _is_explicit_web_paper_request
 from common.title_aliases import TITLE_ALIASES, get_title_alias
 
 logger = logging.getLogger(__name__)
@@ -28,8 +27,6 @@ def _is_general_algorithm_question(message: str) -> bool:
 
 
 def _is_local_kb_question(message: str) -> bool:
-    if _is_explicit_web_paper_request(message):
-        return False
     if _is_general_algorithm_question(message):
         return False
     text = str(message or "").lower()
@@ -59,8 +56,6 @@ def _extract_known_local_paper_queries(message: str) -> List[str]:
 
 
 def _may_need_general_web_search(message: str) -> bool:
-    if _is_explicit_web_paper_request(message):
-        return False
     text = str(message or "").lower()
     keywords = [
         "联网", "网上", "搜索", "查一下", "资料", "来源", "最新", "准确", "定义", "区别", "对比",
@@ -174,8 +169,6 @@ def _clean_retrieval_snippet(text: str, max_len: int = 500) -> str:
 
 
 async def _run_local_kb_preflight_if_needed(message: str, deps: AgentDependencies) -> str:
-    if _is_explicit_web_paper_request(message):
-        return ""
     if not _is_local_kb_question(message):
         return ""
 
@@ -335,7 +328,7 @@ def _build_format_instruction(has_local_evidence: bool, is_general_question: boo
         "- 对比、总结、优缺点、方法分析等任务，应围绕用户要求的维度自然展开。\n"
         "- 算法名保持一致，例如 `RRT*`、`HA-RRT`、`HMA-RRT`、`Hybrid-RRT` 不要混写。\n"
         "- 如无必要，优先用小标题和列表；仅在对比维度清晰时使用表格。\n"
-        "- 若有章节 metadata（`section_title`/`section_path_text`），关键结论尽量标注章节依据。\n"
+        "- 若有章节 metadata，可用于内部核验；除非用户要求，不必在正文标注章节或来源。\n"
         "- 当用户要求论文列表、related work、作者、年份、DOI、期刊/会议、开放获取链接时，必须使用结构化列表，每篇论文单独一项：\n"
         "  1. **Title**\n"
         "     - Authors:\n"
@@ -351,6 +344,6 @@ def _build_format_instruction(has_local_evidence: bool, is_general_question: boo
         return base + "- 这是通用解释问题，可基于通用知识自然作答。\n"
 
     if has_local_evidence:
-        return base + "- 可综合本地片段回答；片段未覆盖的具体点可在对应结论处说明边界。\n"
+        return base + "- 可综合本地片段直接回答；片段未覆盖的具体点避免过度延伸。\n"
 
     return base + "- 若本轮缺少本地证据，避免把结论表述为论文原文事实。\n"

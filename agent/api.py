@@ -9,7 +9,7 @@ import uuid
 import re
 import asyncio
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from dotenv import load_dotenv
@@ -32,18 +32,13 @@ from .agent_runner import (
     get_stream_backend,
 )
 from .agent_langgraph import run_langgraph_analysis
+from .retrieval_harness_runtime import build_retrieval_harness_trace_payload
 from .agent_langchain import (
     GENERATION_RETRY_FAILED_MESSAGE,
     stream_langchain_agent,
     iter_langchain_agent_stream,
     get_langchain_chat_model,
     retry_langchain_agent_after_degenerate,
-)
-from .openalex_router import (
-    _is_openalex_enabled,
-    _is_explicit_web_paper_request,
-    _run_openalex_first_if_needed,
-    _split_openalex_stream_chunks,
 )
 from .routing import (
     _is_general_algorithm_question,
@@ -64,16 +59,33 @@ from .db_utils import (
     create_session,
     get_session,
     add_message,
+    set_message_memory_eligible,
     get_session_messages,
     test_connection,
     refresh_session_metadata,
     list_recent_sessions,
     delete_session,
-    get_session_memory_metadata,
-    update_session_memory_metadata,
+    get_session_memory_snapshot,
+    save_session_memory_snapshot,
+    get_artifact,
+    get_artifact_image,
+    get_document_pdf,
+    delete_document,
+    list_document_annotations,
+    create_document_annotation,
+    update_document_annotation_position,
+    delete_document_annotation,
 )
 from .app_config import get_rabbitmq_url
-from .ingestion_tasks_db import get_ingestion_task
+from .ingestion_tasks_db import (
+    delete_ingestion_task,
+    get_ingestion_task,
+    list_ingestion_tasks,
+    pause_ingestion_task,
+    reorder_ingestion_tasks,
+    resume_ingestion_task as resume_ingestion_task_record,
+    update_ingestion_task_status,
+)
 from .models import (
     ChatRequest,
     ChatResponse,
@@ -103,13 +115,13 @@ from .tools import (
 from .prompts import SYSTEM_PROMPT
 from .providers import test_llm_connection
 from .memory_utils import (
-    TOKEN_LIMIT,
+    build_context,
+    build_memory_update_prompt,
+    memory_eligible_messages,
+    messages_for_memory_update,
+    normalize_memory_summary,
     normalize_memory_state,
-    should_trigger_compression,
-    get_messages_for_next_compaction,
-    build_summary_update_prompt,
-    build_context_without_compaction,
-    sanitize_history_messages,
+    should_update_memory,
 )
 from .memory_runtime import build_session_memory_snapshot
 from .dialog_policy import classify_dialog_turn
@@ -122,12 +134,10 @@ from .simple_chat_runtime import (
 )
 from .ingestion_jobs import (
     add_openalex_file_to_kb,
-    run_sync_upload_ingestion,
-    start_upload_ingestion_job,
-    get_upload_ingestion_job,
-    cancel_upload_ingestion_job,
     submit_async_ingestion_task,
+    submit_async_ingestion_tasks,
 )
+from .rabbitmq_producer import publish_ingestion_task
 from .stream_registry import (
     register_stream_run,
     unregister_stream_run,
@@ -136,6 +146,11 @@ from .stream_registry import (
 )
 from .warning_text import clean_legacy_warning_text
 from .request_context import get_request_id
+from .document_reader_runtime import stream_document_translation, translate_document
+from .selection_translation_runtime import translate_selection
+from .graph_runtime import ensure_paper_graph, get_paper_graph
+from .graph_localization_runtime import schedule_pending_graph_localizations
+from .graph_schema import PaperGraphResponse
 
 load_dotenv()
 
@@ -150,6 +165,7 @@ LLM_FIRST_TOKEN_TIMEOUT_SECONDS = float(os.getenv("LLM_FIRST_TOKEN_TIMEOUT_SECON
 LLM_STREAM_TOTAL_TIMEOUT_SECONDS = float(os.getenv("LLM_STREAM_TOTAL_TIMEOUT_SECONDS", "75"))
 LANGGRAPH_ANALYSIS_TIMEOUT_SECONDS = float(os.getenv("LANGGRAPH_ANALYSIS_TIMEOUT_SECONDS", "90"))
 NON_STREAM_FALLBACK_TIMEOUT_SECONDS = float(os.getenv("NON_STREAM_FALLBACK_TIMEOUT_SECONDS", "35"))
+LIGHTWEIGHT_CHAT_TIMEOUT_SECONDS = float(os.getenv("LIGHTWEIGHT_CHAT_TIMEOUT_SECONDS", "15"))
 RABBITMQ_URL = get_rabbitmq_url()
 
 
@@ -243,31 +259,6 @@ def _is_explicit_general_web_request(message: str) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
-def _should_force_openalex(message: str) -> bool:
-    text = str(message or "").lower()
-    if not _is_explicit_web_paper_request(message):
-        return False
-    paper_keywords = [
-        "openalex",
-        "paper",
-        "doi",
-        "author",
-        "year",
-        "related work",
-        "\u8bba\u6587",
-        "\u4f5c\u8005",
-        "\u5e74\u4efd",
-        "\u63a8\u8350\u8bba\u6587",
-        "\u6700\u65b0\u8bba\u6587",
-        "\u68c0\u7d22\u4e00\u7bc7\u8bba\u6587",
-        "\u641c\u7d22\u4e00\u7bc7\u8bba\u6587",
-        "\u968f\u673a\u68c0\u7d22",
-        "\u6765\u6e90\u94fe\u63a5",
-        "\u77e5\u8bc6\u5e93\u5916",
-    ]
-    return any(keyword in text for keyword in paper_keywords)
-
-
 def _normalize_web_unavailable_reply(
     response: str,
     *,
@@ -297,7 +288,6 @@ def _should_retry_stream_answer(
     sources: List[EvidenceSource],
     *,
     is_local_question: bool,
-    explicit_web_request: bool,
     has_retrieved_sources: bool,
 ) -> tuple[bool, str]:
     text = str(full_response or "")
@@ -324,20 +314,12 @@ def _should_retry_stream_answer(
     if re.search(r"(.{2,12})\1{10,}", stripped):
         return True, "repeated_token_noise"
 
-    # 1. 如果 explicit_web_request=True，保留原逻辑，不强行改写
-    if explicit_web_request:
-        if not sources and has_unverified_web_citations(stripped):
-            return True, "unverified_web_citation"
-        return is_degenerate_answer(stripped), "degenerate_explicit_web"
-
-    # 2. 如果 is_local_question=True 且 sources 或 deps.retrieved_sources 非空
-    # 3. 如果 is_local_question=True 且已有本地 sources：不要因为 is_degenerate_answer 单独触发 retry
+    # Local answers with evidence should not retry solely because of formatting.
     has_any_sources = bool(sources) or bool(has_retrieved_sources)
     if is_local_question and has_any_sources:
         # 本地知识库问题有证据时，优先保留原回答，不要因为排版较差就重试。
         return False, "local_with_evidence_keep"
 
-    # 4. 如果 not sources 且 has_unverified_web_citations(full_response)，可以 retry
     if not sources and has_unverified_web_citations(stripped):
         return True, "unverified_web_citation"
 
@@ -424,15 +406,15 @@ async def get_conversation_context(
     max_messages: Optional[int] = None,
 ) -> List[Dict[str, str]]:
     messages = await get_session_messages(session_id, limit=max_messages)
-    return sanitize_history_messages(messages)
+    return memory_eligible_messages(messages)
 
 
 async def _summarize_for_memory(
     session_id: str,
     user_id: Optional[str],
-    old_summary: str,
-    messages_to_compact: List[Dict[str, str]],
-) -> str:
+    previous_summary: Dict[str, Any],
+    messages_to_compact: List[Dict[str, Any]],
+) -> Dict[str, Any]:
     def _extract_langchain_text(response: Any) -> str:
         content = getattr(response, "content", "")
         if isinstance(content, str):
@@ -452,35 +434,28 @@ async def _summarize_for_memory(
             return "\n".join(parts).strip()
         return str(content).strip()
 
-    summary_prompt = build_summary_update_prompt(
-        old_summary=old_summary,
-        messages_to_compact=messages_to_compact,
-    )
+    summary_prompt = build_memory_update_prompt(previous_summary, messages_to_compact)
     model = get_langchain_chat_model()
     response = await model.ainvoke(
         [
             {
                 "role": "system",
                 "content": (
-                    "You are performing an internal conversation memory compression task. "
-                    "Do not call tools or search documents. Summarize only from the provided history. "
-                    "Output Simplified Chinese."
+                    "You update structured research memory. Return JSON only. Do not call tools, "
+                    "do not retrieve documents, and do not store paper facts or tool output."
                 ),
             },
             {"role": "user", "content": summary_prompt},
         ]
     )
     summary_text = _extract_langchain_text(response).strip()
-    if summary_text:
-        return summary_text
-
-    compact_preview = " ".join(
-        msg.get("content", "").strip() for msg in messages_to_compact if msg.get("content")
-    )
-    compact_preview = " ".join(compact_preview.split())
-    if len(compact_preview) > 300:
-        compact_preview = compact_preview[:300].rstrip() + "..."
-    return old_summary or compact_preview
+    try:
+        normalized_text = summary_text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        parsed = json.loads(normalized_text)
+        return normalize_memory_summary(parsed) if isinstance(parsed, dict) else normalize_memory_summary(previous_summary)
+    except json.JSONDecodeError:
+        logger.warning("Structured memory model response was not valid JSON for session=%s", session_id)
+        return normalize_memory_summary(previous_summary)
 
 
 async def _prepare_agent_prompt(
@@ -489,56 +464,35 @@ async def _prepare_agent_prompt(
     user_message: str,
 ) -> Dict[str, Any]:
     history_messages = await get_conversation_context(session_id=session_id, max_messages=None)
-    memory_metadata = await get_session_memory_metadata(session_id)
-    memory_state = normalize_memory_state(memory_metadata)
+    memory_snapshot = await get_session_memory_snapshot(session_id)
+    memory_state = normalize_memory_state(memory_snapshot)
 
-    compression_needed = should_trigger_compression(
-        system_prompt=SYSTEM_PROMPT,
-        history_messages=history_messages,
-        current_question=user_message,
-        latest_summary=memory_state.latest_summary,
-        token_limit=TOKEN_LIMIT,
-    )
-
-    summary_updated = False
-    if compression_needed:
-        messages_to_compact = get_messages_for_next_compaction(
-            history_messages=history_messages,
-            compacted_message_count=memory_state.compacted_message_count,
-        )
+    memory_updated = False
+    if should_update_memory(history_messages, memory_state, user_message):
+        messages_to_compact = messages_for_memory_update(history_messages, memory_state.covered_message_count)
         if messages_to_compact:
             updated_summary = await _summarize_for_memory(
                 session_id=session_id,
                 user_id=user_id,
-                old_summary=memory_state.latest_summary,
+                previous_summary=memory_state.summary,
                 messages_to_compact=messages_to_compact,
             )
-            memory_state.latest_summary = updated_summary
-            memory_state.compression_count += 1
-            memory_state.compacted_message_count = max(
-                memory_state.compacted_message_count,
-                max(0, len(history_messages) - 6),
-            )
-            summary_updated = True
+            memory_state.summary = updated_summary
+            memory_state.covered_message_count = len(history_messages)
+            memory_updated = True
 
-    context_result = build_context_without_compaction(
+    context_result = build_context(
         history_messages=history_messages,
         current_question=user_message,
         memory_state=memory_state,
     )
-    context_result.summary_updated = summary_updated
-    context_result.latest_summary = memory_state.latest_summary
-    context_result.compression_count = memory_state.compression_count
-    context_result.compacted_message_count = memory_state.compacted_message_count
+    context_result.memory_updated = memory_updated
 
     return {
         "full_prompt": context_result.full_prompt,
         "compression_used": context_result.compression_used,
-        "summary_updated": context_result.summary_updated,
-        "latest_summary": context_result.latest_summary,
-        "compression_count": context_result.compression_count,
-        "compacted_message_count": context_result.compacted_message_count,
-        "compression_needed": compression_needed,
+        "memory_updated": context_result.memory_updated,
+        "memory_state": context_result.memory_state,
         "history_messages": history_messages,
     }
 
@@ -588,13 +542,14 @@ def extract_evidence_sources(
     normalized: List[EvidenceSource] = []
     for source in all_sources:
         source_type = str(getattr(source, "source_type", "") or "").lower()
-        if source_type not in {"local", "web"}:
+        if source_type not in {"local", "web", "artifact"}:
             meta_type = str((source.metadata or {}).get("source_type") or "").lower()
-            source_type = "web" if meta_type == "web" else "local"
+            source_type = "web" if meta_type == "web" else "artifact" if meta_type in {"artifact", "local_artifact"} or str((source.metadata or {}).get("content_type") or "").lower() == "artifact" else "local"
             source.source_type = source_type
         normalized.append(source)
 
     local_sources = [s for s in normalized if s.source_type == "local"]
+    artifact_sources = [s for s in normalized if s.source_type == "artifact"]
     web_sources = [s for s in normalized if s.source_type == "web"]
 
     local_sources.sort(key=lambda s: (s.score is not None, s.score if s.score is not None else -1), reverse=True)
@@ -603,7 +558,7 @@ def extract_evidence_sources(
         reverse=True,
     )
 
-    return local_sources[:local_limit] + web_sources[:web_limit]
+    return artifact_sources[:local_limit] + local_sources[:local_limit] + web_sources[:web_limit]
 
 
 def _count_source_types(sources: List[EvidenceSource]) -> tuple[int, int]:
@@ -660,19 +615,23 @@ async def save_conversation_turn(
     metadata: Optional[Dict[str, Any]] = None,
     user_metadata: Optional[Dict[str, Any]] = None,
     assistant_metadata: Optional[Dict[str, Any]] = None,
+    memory_eligible: bool = False,
 ):
-    await add_message(
+    user_message_id = await add_message(
         session_id=session_id,
         role="user",
         content=user_message,
         metadata=user_metadata if user_metadata is not None else (metadata or {}),
     )
-    await add_message(
+    assistant_message_id = await add_message(
         session_id=session_id,
         role="assistant",
         content=assistant_message,
         metadata=assistant_metadata if assistant_metadata is not None else (metadata or {}),
     )
+    if memory_eligible:
+        await set_message_memory_eligible(user_message_id)
+        await set_message_memory_eligible(assistant_message_id)
     await refresh_session_metadata(session_id)
 
 
@@ -695,7 +654,6 @@ class ChatRuntime:
     deps: AgentDependencies
     requested_search_type: str
     effective_search_type: str
-    explicit_web_request: bool
     effective_use_web_search: bool
     use_react: bool
     full_prompt: str
@@ -718,11 +676,17 @@ class ChatRuntime:
 
 async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
     requested_search_type = _resolve_search_type(request.search_type)
-    explicit_web_request = _should_force_openalex(request.message)
-    effective_use_web_search = bool(bool(request.use_web_search) or explicit_web_request)
+    effective_use_web_search = bool(request.use_web_search)
     request_metadata = request.metadata or {}
     allow_web_search = bool(request_metadata.get("allow_web_search", bool(request.use_web_search)))
     allow_openalex_search = bool(request_metadata.get("allow_openalex_search", True))
+    selected_document_ids = [
+        str(document_id).strip()
+        for document_id in (request_metadata.get("selected_document_ids") or [])
+        if str(document_id).strip()
+    ]
+    scope_mode = str(request_metadata.get("scope_mode") or "knowledge_base").strip()
+    allow_supplemental = bool(request_metadata.get("allow_supplemental", True))
     deps = AgentDependencies(
         session_id=request.session_id or "",
         user_id=request.user_id,
@@ -732,6 +696,10 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
             "default_limit": 10,
             "allow_web_search": allow_web_search,
             "allow_openalex_search": allow_openalex_search,
+            "scope_mode": scope_mode,
+            "selected_document_ids": selected_document_ids,
+            "use_paper_graph": bool(request_metadata.get("use_paper_graph", True)),
+            "allow_supplemental": allow_supplemental,
         },
     )
     context_payload = await _prepare_agent_prompt(
@@ -805,7 +773,6 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
         deps=deps,
         requested_search_type=requested_search_type,
         effective_search_type=str((deps.search_preferences or {}).get("default_search_type", requested_search_type)),
-        explicit_web_request=explicit_web_request,
         effective_use_web_search=effective_use_web_search,
         use_react=bool(request.use_react),
         full_prompt=full_prompt,
@@ -822,6 +789,8 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
             "dialog_act": dialog_policy.dialog_act,
             "dialog_reason": dialog_policy.reason,
             "dialog_response_style": dialog_policy.response_style,
+            "paper_graph_used": False,
+            "paper_graph_expanded_document_count": 0,
             "carry_context": dialog_policy.carry_context,
             "resolved_query": history_resolution.resolved_query,
             "history_resolution_used": history_resolution.used_history,
@@ -848,15 +817,14 @@ async def execute_prepared_chat_runtime(
         compression_used = runtime.compression_used
         effective_search_type = runtime.effective_search_type
 
-        if runtime.context_payload["summary_updated"]:
-            await update_session_memory_metadata(
+        if runtime.context_payload["memory_updated"]:
+            state = runtime.context_payload["memory_state"]
+            await save_session_memory_snapshot(
                 session_id=runtime.session_id,
-                latest_summary=runtime.context_payload["latest_summary"],
-                compression_count=runtime.context_payload["compression_count"],
-                compacted_message_count=runtime.context_payload["compacted_message_count"],
+                covered_message_count=state.covered_message_count,
+                summary=state.summary,
             )
 
-        openalex_first_result = None
         simple_chat_result = None
         if runtime.simple_chat_decision.enabled:
             simple_chat_result = await run_simple_chat_runtime(
@@ -865,17 +833,12 @@ async def execute_prepared_chat_runtime(
                 decision=runtime.simple_chat_decision,
                 response_style=str(runtime.workflow_metadata.get("dialog_response_style") or "normal"),
             )
-        if runtime.explicit_web_request and simple_chat_result is None:
-            openalex_first_result = await _run_openalex_first_if_needed(message=message, deps=deps)
         if simple_chat_result is not None:
             response = simple_chat_result.message
             tools_used = list(simple_chat_result.tools_used or [])
             sources = list(simple_chat_result.sources or [])
             workflow_metadata = dict(simple_chat_result.metadata or {})
             response_backend = "simple_chat_runtime"
-        elif openalex_first_result is not None:
-            response, tools_used, sources, workflow_metadata = openalex_first_result
-            response_backend = "openalex_first"
         else:
             if runtime.use_react and backend == "langchain":
                 graph_result = await run_langgraph_analysis(
@@ -961,6 +924,8 @@ async def execute_prepared_chat_runtime(
                     assistant_message=response,
                     user_metadata={
                         "user_id": deps.user_id,
+                        "scope_mode": (deps.search_preferences or {}).get("scope_mode", "knowledge_base"),
+                        "scope_document_ids": (deps.search_preferences or {}).get("selected_document_ids", []),
                         "compression_used": compression_used,
                         "requested_search_type": runtime.requested_search_type,
                         "effective_search_type": effective_search_type,
@@ -980,6 +945,7 @@ async def execute_prepared_chat_runtime(
                         "agent_backend": response_backend,
                         **safe_workflow_metadata,
                     },
+                    memory_eligible=True,
                 )
             else:
                 await add_message(
@@ -1227,6 +1193,7 @@ async def chat_stream(request: ChatRequest):
             llm_first_token_timeout = False
             llm_stream_total_timeout = False
             llm_generation_elapsed_seconds = 0.0
+            user_message_id: Optional[str] = None
             requested_search_type = _resolve_search_type(request.search_type)
             effective_search_type = requested_search_type
             compression_used = False
@@ -1268,7 +1235,6 @@ async def chat_stream(request: ChatRequest):
                     )
                     yield sse_event("end")
                     return
-                explicit_web_request = _should_force_openalex(request.message)
                 deps = runtime.deps
                 requested_search_type = runtime.requested_search_type
                 effective_search_type = runtime.effective_search_type
@@ -1283,27 +1249,26 @@ async def chat_stream(request: ChatRequest):
                 langgraph_context_prompt = runtime.langgraph_context_prompt
                 compression_used = runtime.compression_used
 
-                if context_payload["summary_updated"]:
-                    yield (
-                        sse_event("status", content="Compressing conversation history...")
-                    )
-
-                if context_payload["summary_updated"]:
-                    await update_session_memory_metadata(
+                if context_payload["memory_updated"]:
+                    yield sse_event("status", content="Updating structured research memory...")
+                    state = context_payload["memory_state"]
+                    await save_session_memory_snapshot(
                         session_id=session_id,
-                        latest_summary=context_payload["latest_summary"],
-                        compression_count=context_payload["compression_count"],
-                        compacted_message_count=context_payload["compacted_message_count"],
+                        covered_message_count=state.covered_message_count,
+                        summary=state.summary,
                     )
 
 
-                await add_message(
+                user_message_id = await add_message(
                     session_id=session_id,
                     role="user",
                     content=request.message,
                     metadata={
                         "run_id": run_id,
+                        "memory_eligible": False,
                         "user_id": request.user_id,
+                        "scope_mode": (deps.search_preferences or {}).get("scope_mode", "knowledge_base"),
+                        "scope_document_ids": (deps.search_preferences or {}).get("selected_document_ids", []),
                         "compression_used": compression_used,
                         "requested_search_type": requested_search_type,
                         "effective_search_type": effective_search_type,
@@ -1313,13 +1278,40 @@ async def chat_stream(request: ChatRequest):
                 )
 
                 if runtime.simple_chat_decision.enabled:
-                    yield sse_event("status", content="Running lightweight local QA...")
-                    simple_chat_result = await run_simple_chat_runtime(
-                        deps=deps,
-                        user_message=request.message,
-                        decision=runtime.simple_chat_decision,
-                        response_style=str(runtime.workflow_metadata.get("dialog_response_style") or "normal"),
+                    is_conversation = runtime.simple_chat_decision.mode == "conversation"
+                    yield sse_event(
+                        "status",
+                        content="正在回复..." if is_conversation else "正在检索相关论文片段...",
                     )
+                    try:
+                        simple_chat_result = await asyncio.wait_for(
+                            run_simple_chat_runtime(
+                                deps=deps,
+                                user_message=request.message,
+                                decision=runtime.simple_chat_decision,
+                                response_style=str(runtime.workflow_metadata.get("dialog_response_style") or "normal"),
+                            ),
+                            timeout=LIGHTWEIGHT_CHAT_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        if is_conversation:
+                            simple_chat_result = None
+                            yield sse_event(
+                                "text",
+                                content="我在。刚才回复稍微慢了一点，但这个问题不需要走论文检索。你可以再问我一次。",
+                            )
+                            yield sse_event("sources", sources=[])
+                            yield sse_event("end")
+                            return
+                        raise
+                    if is_conversation and simple_chat_result is None:
+                        yield sse_event(
+                            "text",
+                            content="我在。这个问题不需要查论文，你可以直接继续和我聊。",
+                        )
+                        yield sse_event("sources", sources=[])
+                        yield sse_event("end")
+                        return
                     if simple_chat_result is not None:
                         response_backend = "simple_chat_runtime"
                         stream_backend = "simple_chat_runtime"
@@ -1370,13 +1362,14 @@ async def chat_stream(request: ChatRequest):
                                 ],
                             )
                         yield sse_event("sources", sources=sources_data)
-                        await add_message(
+                        assistant_message_id = await add_message(
                             session_id=session_id,
                             role="assistant",
                             content=full_response,
                             metadata={
                                 "run_id": run_id,
                                 "streamed": True,
+                                "memory_eligible": True,
                                 "tool_calls": len(tools_used),
                                 "compression_used": compression_used,
                                 "requested_search_type": requested_search_type,
@@ -1389,6 +1382,8 @@ async def chat_stream(request: ChatRequest):
                                 **safe_workflow_metadata,
                             },
                         )
+                        if user_message_id:
+                            await set_message_memory_eligible(user_message_id)
                         await refresh_session_metadata(session_id)
                         _emit_chat_request_metric(
                             request_id=request_id,
@@ -1408,66 +1403,6 @@ async def chat_stream(request: ChatRequest):
                         yield sse_event("end")
                         return
 
-                if explicit_web_request:
-                    yield sse_event("status", content="Searching OpenAlex...")
-                openalex_first_result = None
-                if explicit_web_request:
-                    openalex_first_result = await _run_openalex_first_if_needed(
-                        message=request.message,
-                        deps=deps,
-                    )
-                if openalex_first_result is not None:
-                    response_text, tools_used, sources, workflow_metadata = openalex_first_result
-                    response_backend = "openalex_first"
-                    stream_backend = "openalex_first"
-
-                    for chunk in _split_openalex_stream_chunks(response_text):
-                        if not chunk:
-                            continue
-                        yield sse_event("text", content=chunk)
-                        full_response += chunk
-                        await asyncio.sleep(0.02)
-
-                    if not full_response.strip():
-                        full_response = response_text
-                        yield sse_event("text", content=response_text)
-
-                    sources = _dedupe_sources(sources)
-                    sources_data = [source.model_dump() for source in sources]
-                    if tools_used:
-                        tools_data = [
-                            {
-                                "tool_name": tool.tool_name,
-                                "args": tool.args,
-                                "tool_call_id": tool.tool_call_id,
-                            }
-                            for tool in tools_used
-                        ]
-                        yield sse_event("tools", tools=tools_data)
-                    yield sse_event("sources", sources=sources_data)
-                    await add_message(
-                        session_id=session_id,
-                        role="assistant",
-                        content=full_response,
-                        metadata={
-                            "run_id": run_id,
-                            "streamed": True,
-                            "tool_calls": len(tools_used),
-                            "compression_used": compression_used,
-                            "requested_search_type": requested_search_type,
-                            "effective_search_type": effective_search_type,
-                            "sources": sources_data,
-                            "use_web_search": deps.use_web_search,
-                            "use_react": use_react,
-                            "agent_backend": response_backend,
-                            "stream_backend": stream_backend,
-                            **workflow_metadata,
-                        },
-                    )
-                    await refresh_session_metadata(session_id)
-                    yield sse_event("end")
-                    return
-
                 yield sse_event(
                     "status",
                     content="正在规划回答...",
@@ -1477,9 +1412,13 @@ async def chat_stream(request: ChatRequest):
                 )
                 if use_react and get_agent_backend() == "langchain":
                     progress_queue: asyncio.Queue[Any] = asyncio.Queue()
+                    streamed_answer_parts: List[str] = []
 
                     async def progress_callback(msg: Any) -> None:
                         await progress_queue.put(msg)
+
+                    async def answer_callback(content: str) -> None:
+                        await progress_queue.put({"type": "answer_delta", "content": content})
 
                     graph_task = asyncio.create_task(
                         run_langgraph_analysis(
@@ -1487,6 +1426,7 @@ async def chat_stream(request: ChatRequest):
                             deps=deps,
                             context_prompt=langgraph_context_prompt,
                             progress_callback=progress_callback,
+                            answer_callback=answer_callback,
                         )
                     )
                     graph_start = asyncio.get_running_loop().time()
@@ -1501,6 +1441,12 @@ async def chat_stream(request: ChatRequest):
                             if not msg:
                                 continue
                             if isinstance(msg, dict):
+                                if msg.get("type") == "answer_delta":
+                                    delta = str(msg.get("content") or "")
+                                    if delta:
+                                        streamed_answer_parts.append(delta)
+                                        yield sse_event("text", content=delta)
+                                    continue
                                 payload = {
                                     "content": str(msg.get("content") or ""),
                                     "phase": str(msg.get("phase") or "internal"),
@@ -1523,6 +1469,12 @@ async def chat_stream(request: ChatRequest):
                         if not msg:
                             continue
                         if isinstance(msg, dict):
+                            if msg.get("type") == "answer_delta":
+                                delta = str(msg.get("content") or "")
+                                if delta:
+                                    streamed_answer_parts.append(delta)
+                                    yield sse_event("text", content=delta)
+                                continue
                             payload = {
                                 "content": str(msg.get("content") or ""),
                                 "phase": str(msg.get("phase") or "internal"),
@@ -1546,8 +1498,11 @@ async def chat_stream(request: ChatRequest):
                         full_response,
                         drop_warning=bool(workflow_metadata.get("retrieval_skipped_by_planner") and workflow_metadata.get("direct_answer_allowed")),
                     )
-                    if full_response:
+                    streamed_answer = "".join(streamed_answer_parts).strip()
+                    if full_response and not streamed_answer:
                         yield sse_event("text", content=full_response)
+                    elif full_response.startswith(streamed_answer) and len(full_response) > len(streamed_answer):
+                        yield sse_event("text", content=full_response[len(streamed_answer):])
                     stream_backend = "langgraph"
                 elif stream_backend == "langchain":
                     used_langchain_stream = True
@@ -1654,7 +1609,6 @@ async def chat_stream(request: ChatRequest):
                         full_response,
                         sources,
                         is_local_question=is_local_question,
-                        explicit_web_request=explicit_web_request,
                         has_retrieved_sources=bool(getattr(deps, "retrieved_sources", []) or []),
                     )
                 had_user_visible_text = bool(full_response.strip())
@@ -1748,16 +1702,21 @@ async def chat_stream(request: ChatRequest):
                     yield sse_event("tools", tools=tools_data)
                 if use_react and stream_backend != "langgraph":
                     yield sse_event("status", content="Preparing final answer...")
+                yield sse_event(
+                    "workflow",
+                    retrieval_harness=build_retrieval_harness_trace_payload(safe_workflow_metadata),
+                )
                 yield sse_event("sources", sources=sources_data)
 
                 if full_response.strip():
-                    await add_message(
+                    assistant_message_id = await add_message(
                         session_id=session_id,
                         role="assistant",
                         content=full_response,
                         metadata={
                             "run_id": run_id,
                             "streamed": True,
+                            "memory_eligible": True,
                             "tool_calls": len(tools_used),
                             "compression_used": compression_used,
                             "requested_search_type": requested_search_type,
@@ -1777,7 +1736,9 @@ async def chat_stream(request: ChatRequest):
                             **safe_workflow_metadata,
                         },
                     )
-                await refresh_session_metadata(session_id)
+                    if user_message_id:
+                        await set_message_memory_eligible(user_message_id)
+                    await refresh_session_metadata(session_id)
                 _emit_chat_request_metric(
                     request_id=request_id,
                     session_id=session_id,
@@ -2000,17 +1961,172 @@ async def get_session_messages_endpoint(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/paper-graph", response_model=PaperGraphResponse)
+async def get_paper_graph_endpoint():
+    try:
+        await ensure_paper_graph()
+        await schedule_pending_graph_localizations()
+        return await get_paper_graph()
+    except Exception as exc:
+        logger.error("Paper graph retrieval failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Paper graph is temporarily unavailable")
+
+
+@app.get("/artifacts/{artifact_id}")
+async def get_artifact_endpoint(artifact_id: str):
+    try:
+        artifact = await get_artifact(artifact_id)
+        if not artifact:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+        return artifact
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Artifact retrieval failed for %s: %s", artifact_id, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/artifacts/{artifact_id}/image")
+async def get_artifact_image_endpoint(artifact_id: str):
+    try:
+        image = await get_artifact_image(artifact_id)
+        if not image:
+            raise HTTPException(status_code=404, detail="Artifact image not found")
+        return Response(content=image["content"], media_type=image["media_type"])
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Artifact image retrieval failed for %s: %s", artifact_id, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/documents/{document_id}/pdf")
+async def get_document_pdf_endpoint(document_id: str):
+    pdf = await get_document_pdf(document_id)
+    if not pdf:
+        raise HTTPException(status_code=404, detail="PDF source is unavailable for this document")
+    return Response(content=pdf["content"], media_type=pdf["media_type"])
+
+
+@app.post("/documents/{document_id}/translations/{target_language}")
+async def translate_document_endpoint(document_id: str, target_language: str):
+    try:
+        return await translate_document(document_id, target_language)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Document not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error("Document translation failed for %s: %s", document_id, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/documents/{document_id}/selection-translations/{target_language}")
+async def translate_selection_endpoint(document_id: str, target_language: str, payload: Dict[str, Any]):
+    try:
+        return await translate_selection(
+            document_id,
+            target_language,
+            str(payload.get("selection") or ""),
+            str(payload.get("context_before") or ""),
+            str(payload.get("context_after") or ""),
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Document not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error("Selection translation failed for %s: %s", document_id, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/documents/{document_id}/translations/{target_language}/stream")
+async def stream_document_translation_endpoint(document_id: str, target_language: str):
+    async def events():
+        try:
+            async for event in stream_document_translation(document_id, target_language):
+                event_type = str(event.pop("type"))
+                yield sse_event(event_type, **event)
+            yield sse_event("end")
+        except LookupError:
+            yield sse_event("error", content="Document not found")
+            yield sse_event("end")
+        except ValueError as exc:
+            yield sse_event("error", content=str(exc))
+            yield sse_event("end")
+        except Exception as exc:
+            logger.error("Document translation stream failed for %s: %s", document_id, exc)
+            yield sse_event("error", content=str(exc))
+            yield sse_event("end")
+
+    return stream_response(events())
+
+
+@app.get("/documents/{document_id}/annotations")
+async def list_document_annotations_endpoint(document_id: str):
+    return {"annotations": await list_document_annotations(document_id)}
+
+
+@app.post("/documents/{document_id}/annotations")
+async def create_document_annotation_endpoint(document_id: str, payload: Dict[str, Any]):
+    if not str(payload.get("note") or "").strip():
+        raise HTTPException(status_code=400, detail="note is required")
+    return await create_document_annotation(document_id, payload)
+
+
+@app.patch("/documents/{document_id}/annotations/{annotation_id}")
+async def update_document_annotation_endpoint(document_id: str, annotation_id: str, payload: Dict[str, Any]):
+    try:
+        updated = await update_document_annotation_position(document_id, annotation_id, payload)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="page_x and page_y must be numbers between 0 and 1")
+    if not updated:
+        raise HTTPException(status_code=404, detail="Annotation not found")
+    return updated
+
+
+@app.delete("/documents/{document_id}/annotations/{annotation_id}")
+async def delete_document_annotation_endpoint(document_id: str, annotation_id: str):
+    if not await delete_document_annotation(document_id, annotation_id):
+        raise HTTPException(status_code=404, detail="Annotation not found")
+    return {"status": "deleted", "annotation_id": annotation_id}
+
+
+@app.delete("/documents/{document_id}")
+async def delete_document_endpoint(document_id: str):
+    if not await delete_document(document_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"status": "deleted", "document_id": document_id}
+
+
+@app.post("/documents/{document_id}/upgrade-full")
+async def upgrade_document_to_full_endpoint(document_id: str):
+    """Supplement a fast ingestion with the complete evidence extraction pipeline."""
+    from ingestion.ingest import DocumentIngestionPipeline
+    from .models import IngestionConfig
+
+    pipeline = DocumentIngestionPipeline(IngestionConfig(), include_images=True, include_tables=True)
+    try:
+        await pipeline.initialize()
+        result = await pipeline.upgrade_document_to_full(document_id)
+        return {"status": "succeeded", **result.model_dump()}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    finally:
+        await pipeline.close()
+
+
 @app.get("/sessions/{session_id}/memory", response_model=SessionMemorySnapshot)
 async def get_session_memory_endpoint(session_id: str):
     try:
         session = await get_session(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
-        memory_metadata = await get_session_memory_metadata(session_id)
+        memory_snapshot = await get_session_memory_snapshot(session_id)
         messages = await get_session_messages(session_id)
         snapshot = build_session_memory_snapshot(
             session_id=session_id,
-            memory_metadata=memory_metadata,
+            memory_snapshot=memory_snapshot,
             messages=messages,
         )
         return SessionMemorySnapshot(**snapshot)
@@ -2033,6 +2149,11 @@ async def get_session_info(session_id: str):
     except Exception as e:
         logger.error(f"Session retrieval failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ingestion/tasks", response_model=List[IngestionTaskResponse])
+async def list_ingestion_tasks_endpoint(limit: int = 100):
+    return [IngestionTaskResponse(**task) for task in await list_ingestion_tasks(limit)]
 
 
 @app.get("/ingestion/tasks/{task_id}", response_model=IngestionTaskResponse)
@@ -2069,12 +2190,7 @@ async def add_openalex_to_knowledge_base(payload: Dict[str, Any]):
     if not file_url.startswith("http"):
         raise HTTPException(status_code=400, detail="No valid PDF/content URL provided")
     title = str(payload.get("title") or payload.get("openalex_id") or "openalex_paper")
-    return await add_openalex_file_to_kb(file_url=file_url, title=title)
-
-
-@app.post("/documents/upload")
-async def upload_document_to_kb(payload: Dict[str, Any]):
-    return await run_sync_upload_ingestion(payload)
+    return await add_openalex_file_to_kb(file_url=file_url, title=title, fast=bool(payload.get("fast", False)))
 
 
 @app.post("/ingestion/tasks", response_model=IngestionTaskResponse)
@@ -2083,19 +2199,60 @@ async def submit_ingestion_task(payload: Dict[str, Any]):
     return IngestionTaskResponse(**task)
 
 
-@app.post("/documents/upload/start")
-async def start_document_upload_job(payload: Dict[str, Any]):
-    return await start_upload_ingestion_job(payload)
+@app.post("/ingestion/task-batches", response_model=List[IngestionTaskResponse])
+async def submit_ingestion_task_batch(payload: Dict[str, Any]):
+    files = payload.get("files")
+    if not isinstance(files, list):
+        raise HTTPException(status_code=400, detail="files must be an array")
+    tasks = await submit_async_ingestion_tasks(files)
+    return [IngestionTaskResponse(**task) for task in tasks]
 
 
-@app.get("/documents/upload/jobs/{job_id}")
-async def get_document_upload_job(job_id: str):
-    return await get_upload_ingestion_job(job_id)
+@app.post("/ingestion/tasks/{task_id}/resume", response_model=IngestionTaskResponse)
+async def resume_ingestion_task(task_id: str):
+    task = await resume_ingestion_task_record(task_id)
+    if not task:
+        raise HTTPException(status_code=409, detail="Only a paused ingestion task can be resumed")
+    try:
+        await publish_ingestion_task(
+            task_id=task["task_id"],
+            document_id=task.get("document_id"),
+            file_path=task["file_path"],
+            fast=bool(task.get("fast", False)),
+        )
+    except Exception as exc:
+        await update_ingestion_task_status(
+            task_id=task_id,
+            status="paused_quota",
+            error_message=f"额度已恢复但任务重新投递失败：{str(exc)[:360]}",
+        )
+        raise HTTPException(status_code=503, detail="Failed to requeue ingestion task") from exc
+    return IngestionTaskResponse(**task)
 
 
-@app.post("/documents/upload/jobs/{job_id}/cancel")
-async def cancel_document_upload_job(job_id: str):
-    return await cancel_upload_ingestion_job(job_id)
+@app.post("/ingestion/tasks/{task_id}/pause", response_model=IngestionTaskResponse)
+async def pause_ingestion_task_endpoint(task_id: str):
+    task = await pause_ingestion_task(task_id)
+    if not task:
+        raise HTTPException(status_code=409, detail="Only queued or processing tasks can be paused")
+    return IngestionTaskResponse(**task)
+
+
+@app.delete("/ingestion/tasks/{task_id}", response_model=IngestionTaskResponse)
+async def delete_ingestion_task_endpoint(task_id: str):
+    task = await delete_ingestion_task(task_id)
+    if not task:
+        raise HTTPException(status_code=409, detail="Completed tasks belong to the library and cannot be removed here")
+    return IngestionTaskResponse(**task)
+
+
+@app.put("/ingestion/tasks/order", response_model=List[IngestionTaskResponse])
+async def reorder_ingestion_task_queue(payload: Dict[str, Any]):
+    task_ids = payload.get("task_ids")
+    if not isinstance(task_ids, list) or not all(isinstance(task_id, str) for task_id in task_ids):
+        raise HTTPException(status_code=400, detail="task_ids must be an array of task IDs")
+    return [IngestionTaskResponse(**task) for task in await reorder_ingestion_tasks(task_ids)]
+
 
 if __name__ == "__main__":
     uvicorn.run(

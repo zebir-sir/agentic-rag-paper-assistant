@@ -21,7 +21,7 @@ from agent.models import (
     ComponentStatus,
     ReadinessStatus,
     SessionMemorySnapshot,
-    SessionMemorySections,
+    SessionMemorySummary,
     SearchType
 )
 from agent.tools import ArtifactSearchInput, artifact_search_tool
@@ -307,17 +307,16 @@ class TestConfigurationModels:
     def test_session_memory_snapshot(self):
         snapshot = SessionMemorySnapshot(
             session_id="session-123",
-            latest_summary="当前讨论对象：Agentic RAG",
-            compression_count=2,
-            compacted_message_count=6,
-            using_summary_context=True,
-            summary_sections=SessionMemorySections(current_topic="Agentic RAG"),
+            version=2,
+            covered_message_count=6,
+            using_structured_memory=True,
+            summary=SessionMemorySummary(goal="Agentic RAG", constraints=["中文回答"]),
             recent_messages_preview=[],
         )
 
         assert snapshot.session_id == "session-123"
-        assert snapshot.compression_count == 2
-        assert snapshot.summary_sections.current_topic == "Agentic RAG"
+        assert snapshot.version == 2
+        assert snapshot.summary.goal == "Agentic RAG"
 
 
 class TestArtifactSearchToolModels:
@@ -335,8 +334,8 @@ class TestArtifactSearchToolModels:
 
     @pytest.mark.asyncio
     async def test_artifact_search_tool_converts_to_chunk_result(self, monkeypatch):
-        async def fake_embedding(_text: str):
-            return [0.1] * 8
+        async def fake_embedding(_text: str, _embedding_language=None):
+            return [0.1] * 8, "en"
 
         async def fake_artifact_search(**kwargs):
             assert kwargs["artifact_types"] == ["table", "figure", "algorithm"]
@@ -352,7 +351,7 @@ class TestArtifactSearchToolModels:
                 }
             ]
 
-        monkeypatch.setattr("agent.tools.generate_embedding", fake_embedding)
+        monkeypatch.setattr("agent.tools.generate_routed_embedding", fake_embedding)
         monkeypatch.setattr("agent.tools.artifact_search", fake_artifact_search)
 
         results = await artifact_search_tool(ArtifactSearchInput(query="figure"))

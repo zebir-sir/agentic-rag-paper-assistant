@@ -23,7 +23,13 @@ def test_get_embedding_dimensions_omits_unsupported_models(monkeypatch):
 def test_get_embedding_dimensions_respects_explicit_env_override(monkeypatch):
     monkeypatch.setenv("EMBEDDING_DIMENSIONS", "768")
 
-    assert get_embedding_dimensions("BAAI/bge-m3") == 768
+    assert get_embedding_dimensions("text-embedding-3-small") == 768
+
+
+def test_get_embedding_dimensions_omits_unsupported_baai_model_even_with_env_override(monkeypatch):
+    monkeypatch.setenv("EMBEDDING_DIMENSIONS", "1024")
+
+    assert get_embedding_dimensions("BAAI/bge-large-en-v1.5") is None
 
 
 def test_build_embedding_request_kwargs_omits_dimensions_when_not_supported(monkeypatch):

@@ -8,11 +8,13 @@ def build_ingestion_task_message(
     task_id: str,
     document_id: Optional[str],
     file_path: str,
+    fast: bool = False,
 ) -> Dict[str, Any]:
     return {
         "task_id": task_id,
         "document_id": document_id,
         "file_path": file_path,
+        "fast": bool(fast),
     }
 
 
@@ -20,6 +22,7 @@ async def publish_ingestion_task(
     task_id: str,
     document_id: Optional[str],
     file_path: str,
+    fast: bool = False,
 ) -> None:
     rabbitmq_url = get_rabbitmq_url()
     if not rabbitmq_url:
@@ -31,7 +34,7 @@ async def publish_ingestion_task(
         raise RuntimeError("aio-pika is not installed") from exc
 
     queue_name = get_ingestion_queue_name()
-    message_dict = build_ingestion_task_message(task_id, document_id, file_path)
+    message_dict = build_ingestion_task_message(task_id, document_id, file_path, fast=fast)
     message_body = json.dumps(message_dict, ensure_ascii=False).encode("utf-8")
 
     connection = await aio_pika.connect_robust(rabbitmq_url)

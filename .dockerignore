@@ -1,12 +1,20 @@
 .git
 .venv
 venv/
+web/node_modules/
+web/dist/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 *.log
 .env
+documents/
+documents_retry/
+*.pdf
+*.docx
+evals/results/
+Dockerfile.local-runtime
 
 .tmp/
 tmp/

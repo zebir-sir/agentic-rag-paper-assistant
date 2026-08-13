@@ -64,6 +64,27 @@ def test_grade_empty_results_insufficient():
     assert top_score is None
 
 
+@pytest.mark.asyncio
+async def test_grade_direct_answer_does_not_bypass_missing_required_source_contract():
+    out = await grade_retrieval_node(
+        {
+            "metadata": {
+                "retrieval_skipped_by_planner": True,
+                "direct_answer_allowed": True,
+                "retrieval_contract": {
+                    "required_source_types": ["general_web"],
+                    "unavailable_required_sources": ["general_web"],
+                    "max_retrieval_rounds": 2,
+                },
+            },
+            "retrieval_results": [],
+        }
+    )
+    assert out["retrieval_sufficient"] is False
+    assert out["skip_rewrite"] is True
+    assert out["metadata"]["retrieval_contract_evaluation"]["missing_required_source_types"] == ["general_web"]
+
+
 def test_grade_single_strong_hit_sufficient():
     sufficient, reason, top_score = grade_retrieval_quality(
         results=[{"score": 0.55, "content": "x"}],
@@ -426,6 +447,13 @@ def test_parse_answer_scope_normal_json():
     assert parsed["scope_policy"] == "strict_target"
     assert parsed["target_documents"][0]["document_id"] == "d2"
     assert parsed["allow_supplemental"] is False
+
+
+def test_parse_answer_scope_preserves_target_document_language():
+    docs = [{"id": "d1", "title": "English paper", "metadata": {"document_language": "en"}}]
+    raw = """{"scope_policy":"strict_target","target_documents":[{"document_id":"d1"}]}"""
+    parsed = parse_answer_scope(raw, docs)
+    assert parsed["target_documents"][0]["document_language"] == "en"
 
 
 def test_parse_answer_scope_filters_invalid_doc_id():
@@ -1185,9 +1213,9 @@ async def test_answer_review_node_appends_runtime_caveat_for_unsupported_claim()
         }
     )
     assert out["metadata"]["answer_review_reviewed"] is True
-    assert out["metadata"]["answer_review_action"] == "append_caveat"
+    assert out["metadata"]["answer_review_action"] == "retain_with_metadata"
     assert out["metadata"]["answer_review_risk"] >= 1
-    assert "原文" in out["draft_answer"]
+    assert out["draft_answer"] == "实验表明该方法在 2024 年数据集上提升了 17.3% 的成功率。"
 
 
 @pytest.mark.asyncio
@@ -1356,6 +1384,29 @@ async def test_generate_answer_node_uses_prebuilt_generation_payload(monkeypatch
     assert out["metadata"]["generation_answer_built"] is True
     assert captured["messages"][0]["content"] == "SYSTEM_BODY"
     assert captured["messages"][1]["content"] == "PROMPT_BODY"
+
+
+@pytest.mark.asyncio
+async def test_generate_answer_node_blocks_model_generation_when_required_paper_evidence_is_empty(monkeypatch):
+    class FailModel:
+        async def ainvoke(self, _messages):
+            raise AssertionError("evidence-bound empty retrieval must not call the model")
+
+    monkeypatch.setattr("agent.agent_langgraph.get_langchain_chat_model", lambda: FailModel())
+    state = {
+        "generation_prompt": "PROMPT_BODY",
+        "generation_system_text": "SYSTEM_BODY",
+        "retrieval_results": [],
+        "target_documents": [{"title": "Target paper"}],
+        "metadata": {
+            "generation_context_built": True,
+            "planner_decision": {"needs_retrieval": True, "direct_answer_allowed": False},
+            "answer_policy": {"mode": "retrieve_and_answer"},
+        },
+    }
+    out = await generate_answer_node(state)
+    assert "不能把通用知识当作该论文的算法或伪代码" in out["draft_answer"]
+    assert out["metadata"]["generation_blocked_by_missing_evidence"] is True
 
 
 @pytest.mark.asyncio

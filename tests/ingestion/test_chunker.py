@@ -100,12 +100,14 @@ class TestPDFSemanticChunker:
     
     @patch('ingestion.chunker.OpenAIEmbeddings')
     def test_chunker_initialization_semantic(self, mock_embeddings):
-        """测试使用语义切分器进行初始化。"""
+        """语义切分器在首次使用时按内容语言创建嵌入客户端。"""
         config = ChunkingConfig(use_semantic_splitting=True)
         chunker = PDFSemanticChunker(config)
         
         assert chunker.config == config
         assert hasattr(chunker, 'semantic_splitter')
+        assert mock_embeddings.call_count == 0
+        chunker._semantic_splitter_for_content("这是中文论文正文。" * 80)
         mock_embeddings.assert_called_once()
     
     def test_chunk_content_recursive(self):
@@ -139,6 +141,12 @@ class TestPDFSemanticChunker:
         chunks = chunker.chunk_content("")
         
         assert chunks == []
+
+    def test_fast_ingestion_metadata_skips_all_artifact_chunks(self):
+        chunker = PDFSemanticChunker(ChunkingConfig(use_semantic_splitting=False, chunk_size=1000))
+        content = "# Method\n\nAlgorithm 1\nInput: x\n1. Initialize x\n2. Return x\n\n| Method | Score |\n|---|---|\n| Ours | 90 |"
+        chunks = chunker.chunk_content(content, metadata={"include_artifacts": False})
+        assert all(chunk.metadata.get("content_type") != "artifact" for chunk in chunks)
     
     def test_chunk_content_with_metadata(self):
         """测试分块过程会保留并增强元数据。"""

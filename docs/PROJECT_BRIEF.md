@@ -85,7 +85,7 @@ Planner 会根据用户问题判断是否需要检索、需要什么来源、可
 
 ### 3.5 科研论文分析工作台
 
-Streamlit UI 提供了一个轻量研究工作台：
+React/Vite UI 提供了一个研究工作台：
 
 - 上传论文并入库；
 - 单篇论文总结、创新点、方法、实验、局限性分析；
@@ -101,7 +101,7 @@ Streamlit UI 提供了一个轻量研究工作台：
 ```text
 User
   ↓
-Streamlit Research Workspace
+React Research Workspace
   ↓
 FastAPI Backend
   ↓
@@ -123,7 +123,7 @@ Streaming Answer + Evidence Sources
 
 | 层级 | 技术 |
 |---|---|
-| Frontend | Streamlit |
+| Frontend | React + Vite + Three.js |
 | Backend | FastAPI, SSE |
 | Agent Workflow | LangChain, LangGraph |
 | Optional Agent Runtime | Pydantic AI |

@@ -9,6 +9,7 @@ from langchain_core.documents import Document
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from agent.embedding_runtime import detect_embedding_language, get_embedding_route
 
 logger = logging.getLogger(__name__)
 
@@ -77,25 +78,17 @@ class PDFSemanticChunker:
         self.embeddings = None
         self.semantic_splitter = None
 
-        # 语义切分器
-        if config.use_semantic_splitting:
-            self.embeddings = OpenAIEmbeddings(
-                model=os.getenv("EMBEDDING_MODEL", "text-embedding-v4"),
-                openai_api_key=os.getenv("OPENAI_API_KEY"),
-                openai_api_base=os.getenv("OPENAI_BASE_URL"),
-                tiktoken_enabled=False,
-            )
-            self.semantic_splitter = SemanticChunker(
-                embeddings=self.embeddings,
-                breakpoint_threshold_type="percentile",  # 按百分位阈值切分差异点
-            )
-
         # 递归切分器
         self.fallback_splitter = RecursiveCharacterTextSplitter(
             chunk_size=config.chunk_size,
             chunk_overlap=config.chunk_overlap,
             length_function=len,
         )
+
+    def _semantic_splitter_for_content(self, content: str) -> SemanticChunker:
+        route = get_embedding_route(language=detect_embedding_language(content))
+        embeddings = OpenAIEmbeddings(model=route.model, openai_api_key=route.api_key, openai_api_base=route.base_url, tiktoken_enabled=False)
+        return SemanticChunker(embeddings=embeddings, breakpoint_threshold_type="percentile")
 
     def _is_standard_paper_section_title(self, title: str) -> bool:
         normalized = str(title or "").strip().lower()
@@ -225,7 +218,7 @@ class PDFSemanticChunker:
         doc = Document(page_content=content, metadata=base_metadata)
         try:
             if self.config.use_semantic_splitting and len(content) > self.config.chunk_size:
-                chunks = self.semantic_splitter.split_documents([doc])
+                chunks = self._semantic_splitter_for_content(content).split_documents([doc])
                 for chunk in chunks:
                     chunk.metadata["chunk_method"] = "semantic"
             else:
@@ -261,7 +254,11 @@ class PDFSemanticChunker:
             "section_end_line": section.end_line,
         }
 
-        artifact_candidates = self._extract_artifacts(section.content)
+        artifact_candidates = (
+            self._extract_artifacts(section.content)
+            if bool(section_metadata.get("include_artifacts", True))
+            else []
+        )
         artifact_chunks = self._build_artifact_chunks(
             section=section,
             section_metadata=section_metadata,
@@ -579,6 +576,7 @@ class PDFSemanticChunker:
                         "chunk_method": method_map.get(artifact.artifact_type, "artifact"),
                         "artifact_index": global_artifact_index,
                         "caption": artifact.caption,
+                        "raw_artifact_content": artifact.content,
                         "artifact_start_line": section.start_line + artifact.start_line_idx,
                         "artifact_end_line": section.start_line + artifact.end_line_idx,
                         "context_before": context_before,

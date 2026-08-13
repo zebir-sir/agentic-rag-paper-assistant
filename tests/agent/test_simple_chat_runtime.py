@@ -37,6 +37,20 @@ def test_choose_simple_chat_strategy_skips_complex_compare_question():
     assert decision.reason == "complex_question"
 
 
+def test_choose_simple_chat_strategy_keeps_social_chat_out_of_deep_analysis():
+    decision = choose_simple_chat_strategy(
+        message="你觉得我帅吗",
+        resolved_query="你觉得我帅吗",
+        is_local_question=False,
+        use_react=True,
+        use_web_search=False,
+    )
+
+    assert decision.enabled is True
+    assert decision.mode == "conversation"
+    assert decision.reason == "lightweight_conversation"
+
+
 @pytest.mark.asyncio
 async def test_run_simple_chat_runtime_returns_message_and_sources(monkeypatch):
     async def fake_run_artifact_search_payload(**kwargs):

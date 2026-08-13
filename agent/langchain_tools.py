@@ -28,18 +28,23 @@ class KnowledgeSearchArgs(BaseModel):
 class VectorSearchArgs(BaseModel):
     query: str
     limit: int = 10
+    document_ids: Optional[List[str]] = None
+    embedding_language: Optional[str] = None
 
 
 class HybridSearchArgs(BaseModel):
     query: str
     limit: int = 10
     text_weight: float = 0.3
+    document_ids: Optional[List[str]] = None
+    embedding_language: Optional[str] = None
 
 
 class SectionSearchArgs(BaseModel):
     query: str
     section_query: str
     document_id: Optional[str] = None
+    document_ids: Optional[List[str]] = None
     limit: int = Field(default=10, ge=1, le=50)
 
 
@@ -48,7 +53,9 @@ class ArtifactSearchArgs(BaseModel):
     limit: int = Field(default=10, ge=1, le=50)
     artifact_types: Optional[List[str]] = None
     document_id: Optional[str] = None
+    document_ids: Optional[List[str]] = None
     text_weight: float = Field(default=0.3, ge=0.0, le=1.0)
+    embedding_language: Optional[str] = None
 
 
 class DocumentArgs(BaseModel):
@@ -71,19 +78,34 @@ class WebSearchArgs(BaseModel):
 
 
 def build_langchain_tools(deps: AgentDependencies) -> list:
-    async def vector_search_async(query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        return await run_vector_search_payload(deps=deps, query=query, limit=limit)
+    async def vector_search_async(
+        query: str,
+        limit: int = 10,
+        document_ids: Optional[List[str]] = None,
+        embedding_language: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        return await run_vector_search_payload(
+            deps=deps,
+            query=query,
+            limit=limit,
+            document_ids=document_ids,
+            embedding_language=embedding_language,
+        )
 
     async def hybrid_search_async(
         query: str,
         limit: int = 10,
         text_weight: float = 0.3,
+        document_ids: Optional[List[str]] = None,
+        embedding_language: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         return await run_hybrid_search_payload(
             deps=deps,
             query=query,
             limit=limit,
             text_weight=text_weight,
+            document_ids=document_ids,
+            embedding_language=embedding_language,
         )
 
     async def search_knowledge_base_async(
@@ -101,6 +123,7 @@ def build_langchain_tools(deps: AgentDependencies) -> list:
         query: str,
         section_query: str,
         document_id: Optional[str] = None,
+        document_ids: Optional[List[str]] = None,
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
         return await run_section_search_payload(
@@ -108,6 +131,7 @@ def build_langchain_tools(deps: AgentDependencies) -> list:
             query=query,
             section_query=section_query,
             document_id=document_id,
+            document_ids=document_ids,
             limit=limit,
         )
 
@@ -116,7 +140,9 @@ def build_langchain_tools(deps: AgentDependencies) -> list:
         limit: int = 10,
         artifact_types: Optional[List[str]] = None,
         document_id: Optional[str] = None,
+        document_ids: Optional[List[str]] = None,
         text_weight: float = 0.3,
+        embedding_language: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         return await run_artifact_search_payload(
             deps=deps,
@@ -124,7 +150,9 @@ def build_langchain_tools(deps: AgentDependencies) -> list:
             limit=limit,
             artifact_types=artifact_types,
             document_id=document_id,
+            document_ids=document_ids,
             text_weight=text_weight,
+            embedding_language=embedding_language,
         )
 
     async def get_document_async(document_id: str) -> Optional[Dict[str, Any]]:

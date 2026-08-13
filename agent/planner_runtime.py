@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional, Tuple
 
 from .intent_planner import IntentPlan, PlannerCapabilities, RetrievalStep
+from .tool_specs import get_tool_source_type
 
 
 def summarize_hits_for_planner(hits: List[Dict[str, Any]], max_items: int = 3) -> str:
@@ -57,7 +58,7 @@ def _step_to_tool_call(step: RetrievalStep) -> Tuple[str, Dict[str, Any]]:
     return "none", {}
 
 
-def _normalize_external_result(item: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_external_result(item: Dict[str, Any], source_type: str) -> Dict[str, Any]:
     title = str(item.get("title") or "External Source")
     snippet = str(item.get("snippet") or item.get("abstract") or title)
     source = str(item.get("source") or item.get("provider") or "web")
@@ -67,10 +68,33 @@ def _normalize_external_result(item: Dict[str, Any]) -> Dict[str, Any]:
         "document_id": doc_id,
         "content": snippet,
         "score": 0.0,
-        "metadata": {"source_type": "web", **({} if not isinstance(item, dict) else item)},
+        "metadata": {**({} if not isinstance(item, dict) else item), "source_type": source_type},
         "document_title": title,
         "document_source": source,
     }
+
+
+def _normalize_tool_result_item(item: Any, source_type: str) -> Optional[Dict[str, Any]]:
+    """Convert tool envelopes into the dict shape used by retrieval state.
+
+    LangChain tools return Pydantic ``ChunkResult`` values, while a few adapters
+    return dictionaries.  Keep this conversion at the runtime boundary so a
+    successful tool call cannot be recorded as having results while its evidence
+    silently disappears before grading and generation.
+    """
+    if hasattr(item, "model_dump"):
+        value = item.model_dump()
+    elif isinstance(item, dict):
+        value = dict(item)
+    else:
+        return None
+    if not isinstance(value, dict):
+        return None
+    value["metadata"] = {
+        **dict(value.get("metadata") or {}),
+        "source_type": source_type,
+    }
+    return value
 
 
 async def execute_intent_plan_steps(
@@ -79,6 +103,9 @@ async def execute_intent_plan_steps(
     fallback_query: str,
     warnings: Optional[List[str]] = None,
     capabilities: Optional[PlannerCapabilities] = None,
+    target_document_ids: Optional[List[str]] = None,
+    target_embedding_language: Optional[str] = None,
+    enforce_target_scope: bool = False,
 ) -> Dict[str, Any]:
     warnings = list(warnings or [])
     caps = capabilities or PlannerCapabilities()
@@ -97,6 +124,12 @@ async def execute_intent_plan_steps(
         "search_openalex_papers": caps.openalex_search_enabled,
         "search_web": caps.web_search_enabled,
     }
+    normalized_target_ids = list(
+        dict.fromkeys(str(value).strip() for value in (target_document_ids or []) if str(value).strip())
+    )
+    normalized_target_language = str(target_embedding_language or "").strip().lower()
+    if normalized_target_language not in {"zh", "en"}:
+        normalized_target_language = ""
 
     for step in planned:
         tool_name, args = _step_to_tool_call(step)
@@ -106,6 +139,13 @@ async def execute_intent_plan_steps(
             warnings.append(f"tool_unavailable:{tool_name}")
             filtered_unavailable_tools.append(tool_name)
             continue
+        if enforce_target_scope and normalized_target_ids and tool_name in {
+            "hybrid_search", "vector_search", "section_search", "artifact_search",
+        }:
+            if not args.get("document_id"):
+                args["document_ids"] = normalized_target_ids
+            if tool_name in {"hybrid_search", "vector_search", "artifact_search"} and normalized_target_language:
+                args["embedding_language"] = normalized_target_language
         dedupe_key = f"{tool_name}|{args.get('query','')}|{args.get('document_id','')}"
         if dedupe_key in seen:
             continue
@@ -116,10 +156,20 @@ async def execute_intent_plan_steps(
             continue
         try:
             out = list(await tool.ainvoke(args) or [])
+            source_type = get_tool_source_type(str(step.tool)) or "unknown"
             if tool_name in {"search_openalex_papers", "search_web"}:
-                out = [_normalize_external_result(x) for x in out if isinstance(x, dict)]
+                out = [_normalize_external_result(x, source_type) for x in out if isinstance(x, dict)]
+            else:
+                normalized_out: List[Dict[str, Any]] = []
+                for item in out:
+                    normalized_item = _normalize_tool_result_item(item, source_type)
+                    if normalized_item is not None:
+                        normalized_out.append(normalized_item)
+                out = normalized_out
             results.extend(out)
-            tools_executed.append({"tool": tool_name, "args": args})
+            tools_executed.append(
+                {"tool": tool_name, "args": args, "source_type": source_type, "result_count": len(out)}
+            )
         except Exception as exc:
             warnings.append(f"planned tool failed: {tool_name}: {exc}")
             continue

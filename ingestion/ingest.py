@@ -12,11 +12,14 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from warnings import filterwarnings
 
-from agent.db_utils import close_database, db_pool, execute_init_sql, initialize_database
+from agent.db_utils import close_database, db_pool, execute_init_sql, get_document, get_document_pdf_bytes, initialize_database
 from agent.models import IngestionConfig, IngestionResult
 from agent.providers import build_embedding_request_kwargs, get_embedding_model
+from agent.embedding_runtime import detect_embedding_language, get_embedding_client_for_route, get_embedding_route
+from agent.graph_runtime import refresh_paper_graph
 from .chunker import ChunkingConfig, DocumentChunk, create_chunker
 from .extract_files import PDFExtractionConfig, create_pdf_extractor
+from .vision_client import ArkVisionClient, figure_context
 
 filterwarnings("ignore", category=UserWarning)
 
@@ -52,6 +55,8 @@ class DocumentIngestionPipeline:
             images_scale=1.0,
             include_images=include_images,
             include_tables=include_tables,
+            image_output_dir=os.getenv("VISION_IMAGE_ASSET_DIR", os.path.join(documents_folder, ".vision_assets")),
+            max_images=None,
         )
 
         # 配置分块
@@ -121,21 +126,32 @@ class DocumentIngestionPipeline:
         """导入单个文档。"""
         start_time = datetime.now()
 
+        print("INGEST_STAGE=extract", flush=True)
         document_content, document_metadata = self.extractor.extract_pdf_content(file_path)
         document_source = os.path.relpath(file_path, self.documents_folder)
-        document_title = document_metadata.get("title", document_source)
+        document_title = str(document_metadata.get("title") or document_source).strip()
+        document_metadata["document_language"] = detect_embedding_language(document_content)
+        document_metadata["include_artifacts"] = bool(self.extractor_config.include_images or self.extractor_config.include_tables)
+
+        print("INGEST_STAGE=vision", flush=True)
+        vision_chunks = await self._build_vision_chunks(document_content, document_metadata, document_title, document_source)
+        if vision_chunks:
+            document_metadata["vision_analyses"] = [chunk.metadata.get("vision_analysis") for chunk in vision_chunks]
 
         logger.info(f"Processing document: {document_title}")
         logger.info(
             f"Found {document_metadata.get('pictures', 0)} images and {document_metadata.get('tables', 0)} tables"
         )
 
+        print("INGEST_STAGE=structure", flush=True)
         main_chunks = self.chunker.chunk_content(
             content=document_content,
             title=document_title,
             source=document_source,
             metadata=document_metadata,
         )
+
+        main_chunks.extend(vision_chunks)
 
         if not main_chunks:
             logger.warning(f"No chunks created for {document_title}")
@@ -146,6 +162,11 @@ class DocumentIngestionPipeline:
                 processing_time_ms=(datetime.now() - start_time).total_seconds() * 1000,
             )
 
+        # 视觉证据块在普通文本分块之后追加，重新编号保证数据库排序稳定。
+        total_chunks = len(main_chunks)
+        for index, chunk in enumerate(main_chunks):
+            chunk.index = index
+            chunk.metadata.update({"chunk_index": index, "total_chunks": total_chunks})
         logger.info(f"Total chunks created: {len(main_chunks)}")
         method_counts = Counter(
             str((chunk.metadata or {}).get("chunk_method") or "unknown")
@@ -159,19 +180,28 @@ class DocumentIngestionPipeline:
         logger.info("Chunk method distribution for %s: %s", document_title, dict(method_counts))
         logger.info("Detected %s unique sections for %s", len(section_titles), document_title)
 
+        print("INGEST_STAGE=embed", flush=True)
         embedded_chunks = await self.aembed_chunks(
             chunks=main_chunks,
             model=get_embedding_model(),
         )
         logger.info(f"Generated embeddings for {len(embedded_chunks)} chunks")
 
+        print("INGEST_STAGE=persist", flush=True)
         document_id = await self._save_to_postgres(
             document_title,
             document_source,
             document_content,
             embedded_chunks,
             document_metadata,
+            pdf_bytes=Path(file_path).read_bytes(),
         )
+
+        try:
+            print("INGEST_STAGE=graph", flush=True)
+            await refresh_paper_graph(document_id)
+        except Exception as exc:
+            logger.exception("Paper graph refresh failed for %s: %s", document_id, exc)
 
         logger.info(f"Saved document to PostgreSQL with ID: {document_id}")
 
@@ -182,6 +212,197 @@ class DocumentIngestionPipeline:
             chunks_created=len(main_chunks),
             processing_time_ms=processing_time,
         )
+
+    async def upgrade_document_to_full(self, document_id: str) -> IngestionResult:
+        """Rebuild one fast-ingested paper into full text/algorithm/table/figure evidence."""
+        document = await get_document(document_id)
+        pdf_bytes = await get_document_pdf_bytes(document_id)
+        if not document or not pdf_bytes:
+            raise ValueError("该论文没有保存可用于补充入库的原始 PDF")
+
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="upgrade_ingest_") as temp_dir:
+            path = Path(temp_dir) / "paper.pdf"
+            path.write_bytes(pdf_bytes)
+            content, metadata = self.extractor.extract_pdf_content(str(path))
+            metadata["document_language"] = detect_embedding_language(content)
+            metadata["include_artifacts"] = True
+            title = str(document["title"])
+            source = str(document["source"])
+            vision_chunks = await self._build_vision_chunks(content, metadata, title, source)
+            chunks = self.chunker.chunk_content(content, title=title, source=source, metadata=metadata)
+            chunks.extend(vision_chunks)
+            for index, chunk in enumerate(chunks):
+                chunk.index = index
+                chunk.metadata.update({"chunk_index": index, "total_chunks": len(chunks)})
+            embedded = await self.aembed_chunks(chunks, model=get_embedding_model())
+
+            async with db_pool.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute("DELETE FROM chunks WHERE document_id=$1::uuid", document_id)
+                    await conn.execute("DELETE FROM artifacts WHERE document_id=$1::uuid", document_id)
+                    await self._save_visual_artifacts(conn, document_id, embedded)
+                    for chunk in embedded:
+                        embedding_data = "[" + ",".join(map(str, chunk.embedding)) + "]"
+                        metadata_value = {**chunk.metadata, "chunk_type": chunk.metadata.get("content_type", "text")}
+                        await conn.execute(
+                            """INSERT INTO chunks(document_id,content,embedding,chunk_index,metadata,token_count)
+                               VALUES($1::uuid,$2,$3::vector,$4,$5::jsonb,$6)""",
+                            document_id, chunk.content, embedding_data, chunk.index,
+                            json.dumps(metadata_value, ensure_ascii=False), chunk.token_count,
+                        )
+                    metadata["include_artifacts"] = True
+                    metadata["upgraded_to_full_at"] = datetime.now().isoformat()
+                    await conn.execute(
+                        "UPDATE documents SET content=$2, metadata=$3::jsonb, updated_at=CURRENT_TIMESTAMP WHERE id=$1::uuid",
+                        document_id, content, json.dumps(metadata, ensure_ascii=False),
+                    )
+            try:
+                await refresh_paper_graph(document_id)
+            except Exception as exc:
+                logger.exception("Paper graph refresh failed for upgraded document %s: %s", document_id, exc)
+            return IngestionResult(document_id=document_id, title=title, chunks_created=len(embedded), processing_time_ms=0)
+
+    async def _build_vision_chunks(
+        self,
+        markdown: str,
+        metadata: Dict[str, Any],
+        title: str,
+        source: str,
+    ) -> List[DocumentChunk]:
+        """将已导出的论文图逐张转为带图注与邻近语境的检索证据块。"""
+        assets = metadata.get("vision_assets") or []
+        if not assets:
+            return []
+        chunks: List[DocumentChunk] = []
+        failures: List[str] = []
+        for asset in assets:
+            caption = str(asset.get("caption") or "").strip()
+            context_before, context_after = figure_context(markdown, caption)
+            try:
+                analysis = await ArkVisionClient().analyze_figure(
+                    asset["path"], caption=caption, context_before=context_before, context_after=context_after
+                )
+            except Exception as exc:
+                failures.append(str(exc)[:300])
+                logger.warning("Vision analysis skipped for %s: %s", source, exc)
+                continue
+            analysis_dict = analysis.to_dict()
+            figure_number = int(asset.get("index", len(chunks))) + 1
+            body = (
+            "[Artifact: Figure]\n"
+            f"[Document: {title}]\n"
+            f"[Caption: {caption or '[无图注]'}]\n"
+            f"[Context before: {context_before or '[无]'}]\n"
+            f"[Context after: {context_after or '[无]'}]\n\n"
+            f"Visual summary: {analysis.summary or '[无]'}\n"
+            f"Figure type: {analysis.figure_type}\n"
+            f"Research purpose: {analysis.research_purpose or '[无]'}\n"
+            f"Experimental task: {analysis.experimental_task or '[无]'}\n"
+            f"Axes and units: {'; '.join(analysis.axes_and_units) or '[无]'}\n"
+            f"Series or methods: {'; '.join(analysis.series_or_methods) or '[无]'}\n"
+            f"Visible text: {'; '.join(analysis.visible_text) or '[无]'}\n"
+            f"Observations: {'; '.join(analysis.observations) or '[无]'}\n"
+            f"Quantitative findings: {'; '.join(analysis.quantitative_findings) or '[无]'}\n"
+            f"Comparative claims: {'; '.join(analysis.comparative_claims) or '[无]'}\n"
+            f"Visual tags: {'; '.join(analysis.visual_tags) or '[无]'}\n"
+            f"Evidence confidence: {analysis.evidence_confidence}\n"
+                f"Limitations: {'; '.join(analysis.limitations) or '[无]'}"
+            )
+            chunks.append(DocumentChunk(
+            content=body,
+            index=0,
+            start_char=0,
+            end_char=len(body),
+            metadata={
+                "title": title,
+                "source": source,
+                "content_type": "artifact",
+                "artifact_type": "figure",
+                "chunk_method": "vision_figure",
+                "retrieval_title": caption or f"{title} figure {figure_number}",
+                "caption": caption,
+                "image_asset_path": asset["path"],
+                "vision_analysis": analysis_dict,
+                "vision_context_before": context_before,
+                "vision_context_after": context_after,
+                "figure_number": figure_number,
+                "page_number": asset.get("page"),
+                # 图卡由视觉模型生成时可能使用与原论文不同的表述语言；
+                # 检索向量仍必须与整篇论文共享同一语言模型。
+                "document_language": str(metadata.get("document_language") or "").strip().lower(),
+            },
+            ))
+        metadata["vision_analysis_status"] = "success" if chunks else "failed"
+        metadata["vision_model"] = chunks[0].metadata["vision_analysis"]["model"] if chunks else None
+        if failures:
+            metadata["vision_analysis_errors"] = failures
+        return chunks
+
+    @staticmethod
+    def _media_type_for_path(path: str) -> str:
+        suffix = Path(path).suffix.lower()
+        return {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(
+            suffix, "image/png"
+        )
+
+    async def _save_visual_artifacts(self, conn: Any, document_id: str, chunks: List[DocumentChunk]) -> None:
+        """Persist figures and tables as complete research evidence records.
+
+        Only figure/table chunks are promoted. Algorithms deliberately keep the
+        existing text-chunk representation because their original text is already
+        directly searchable and citable.
+        """
+        for chunk in chunks:
+            metadata = dict(chunk.metadata or {})
+            artifact_type = str(metadata.get("artifact_type") or "").lower()
+            if metadata.get("content_type") != "artifact" or artifact_type not in {"figure", "table"}:
+                continue
+
+            image_path = str(metadata.get("image_asset_path") or "")
+            image_blob = None
+            image_media_type = None
+            if artifact_type == "figure" and image_path:
+                path = Path(image_path)
+                if path.is_file():
+                    image_blob = path.read_bytes()
+                    image_media_type = self._media_type_for_path(image_path)
+
+            structured_data = dict(metadata.get("vision_analysis") or {})
+            structured_data.update(
+                {
+                    "artifact_index": metadata.get("artifact_index"),
+                    "figure_number": metadata.get("figure_number"),
+                    "artifact_start_line": metadata.get("artifact_start_line"),
+                    "artifact_end_line": metadata.get("artifact_end_line"),
+                    "document_language": metadata.get("document_language"),
+                }
+            )
+            artifact_row = await conn.fetchrow(
+                """
+                INSERT INTO artifacts (
+                    document_id, artifact_type, caption, page_number, section_path,
+                    context_before, context_after, raw_content, structured_data,
+                    retrieval_text, image_blob, image_media_type
+                )
+                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12)
+                RETURNING id::text
+                """,
+                document_id,
+                artifact_type,
+                str(metadata.get("caption") or ""),
+                metadata.get("page") or metadata.get("page_number"),
+                str(metadata.get("section_path_text") or ""),
+                str(metadata.get("vision_context_before") or metadata.get("context_before") or ""),
+                str(metadata.get("vision_context_after") or metadata.get("context_after") or ""),
+                str(metadata.get("raw_artifact_content") or chunk.content),
+                json.dumps(structured_data, ensure_ascii=False),
+                chunk.content,
+                image_blob,
+                image_media_type,
+            )
+            metadata["artifact_id"] = artifact_row["id"]
+            chunk.metadata = metadata
 
     async def ingest_documents(self, progress_callback: Optional[callable] = None) -> List[IngestionResult]:
         """导入文档目录中的所有文档。"""
@@ -225,6 +446,11 @@ class DocumentIngestionPipeline:
                     )
                 )
 
+        failed_results = [result for result in results if not str(result.document_id or "").strip()]
+        if failed_results:
+            failed_titles = ", ".join(str(result.title or "unknown") for result in failed_results[:3])
+            raise RuntimeError(f"{len(failed_results)} document(s) were not persisted: {failed_titles}")
+
         total_chunks = sum(r.chunks_created for r in results)
         logger.info(f"Ingestion complete: {len(results)} documents, {total_chunks} chunks")
         return results
@@ -238,48 +464,99 @@ class DocumentIngestionPipeline:
         if not chunks:
             return []
 
-        client = AsyncOpenAI(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            base_url=os.getenv("OPENAI_BASE_URL"),
-        )
+        routed_chunks: Dict[tuple[str, str], List[DocumentChunk]] = {}
+        for chunk in chunks:
+            route = get_embedding_route(language=str(chunk.metadata.get("document_language") or "") or None)
+            routed_chunks.setdefault((route.language, route.model), []).append(chunk)
 
-        texts = [chunk.content for chunk in chunks]
-        embedded_chunks = []
+        embedded_by_index: Dict[int, DocumentChunk] = {}
         batch_size = 10  # 百炼 text-embedding-v4 单次最多 10 条
 
-        for start in range(0, len(texts), batch_size):
-            batch_texts = texts[start:start + batch_size]
-            resp = await client.embeddings.create(
+        for (language, route_model), route_chunks in routed_chunks.items():
+            route = get_embedding_route(language=language)
+            client = get_embedding_client_for_route(route)
+            for start in range(0, len(route_chunks), batch_size):
+                batch_chunks = route_chunks[start:start + batch_size]
+                try:
+                    resp = await client.embeddings.create(
+                        **build_embedding_request_kwargs(
+                            model=route_model,
+                            input_value=[chunk.content for chunk in batch_chunks],
+                            encoding_format="float",
+                        )
+                    )
+                    vectors = [item.embedding for item in resp.data]
+                except Exception as exc:
+                    logger.warning(
+                        "Embedding batch %s-%s was rejected; isolating individual chunks: %s",
+                        batch_chunks[0].index,
+                        batch_chunks[-1].index,
+                        exc,
+                    )
+                    vectors = [
+                        await self._embed_chunk_with_formula_fallback(client, route_model, chunk)
+                        for chunk in batch_chunks
+                    ]
+                for chunk, vector in zip(batch_chunks, vectors):
+                    embedded_chunk = DocumentChunk(
+                        content=chunk.content,
+                        index=chunk.index,
+                        start_char=chunk.start_char,
+                        end_char=chunk.end_char,
+                        metadata={
+                            **chunk.metadata,
+                            "embedding_model": route_model,
+                            "embedding_language": language,
+                            "embedding_generated_at": datetime.now().isoformat(),
+                        },
+                    )
+                    embedded_chunk.embedding = vector
+                    embedded_by_index[chunk.index] = embedded_chunk
+        return [embedded_by_index[chunk.index] for chunk in chunks]
+
+    async def _embed_chunk_with_formula_fallback(
+        self,
+        client: AsyncOpenAI,
+        model: str,
+        chunk: DocumentChunk,
+    ) -> List[float]:
+        """Keep the original retrieval chunk while splitting only a rejected model input."""
+        try:
+            response = await client.embeddings.create(
                 **build_embedding_request_kwargs(
                     model=model,
-                    input_value=batch_texts,
+                    input_value=[chunk.content],
                     encoding_format="float",
                 )
             )
-            vectors = [item.embedding for item in resp.data]
-
-            logger.info(
-                "Embedding batch %s/%s processed",
-                start // batch_size + 1,
-                (len(texts) + batch_size - 1) // batch_size,
+            return response.data[0].embedding
+        except Exception as exc:
+            fragments = [chunk.content[offset:offset + 500] for offset in range(0, len(chunk.content), 500)]
+            if len(fragments) < 2:
+                raise RuntimeError(
+                    f"Embedding rejected chunk {chunk.index} ({len(chunk.content)} chars): {exc}"
+                ) from exc
+            logger.warning(
+                "Embedding formula-dense chunk %s (%s chars) as %s weighted fragments",
+                chunk.index,
+                len(chunk.content),
+                len(fragments),
             )
-
-            for chunk, vector in zip(chunks[start:start + batch_size], vectors):
-                embedded_chunk = DocumentChunk(
-                    content=chunk.content,
-                    index=chunk.index,
-                    start_char=chunk.start_char,
-                    end_char=chunk.end_char,
-                    metadata={
-                        **chunk.metadata,
-                        "embedding_model": model,
-                        "embedding_generated_at": datetime.now().isoformat(),
-                    },
+            vectors_and_weights: List[tuple[List[float], int]] = []
+            for fragment in fragments:
+                response = await client.embeddings.create(
+                    **build_embedding_request_kwargs(
+                        model=model,
+                        input_value=[fragment],
+                        encoding_format="float",
+                    )
                 )
-                embedded_chunk.embedding = vector
-                embedded_chunks.append(embedded_chunk)
-
-        return embedded_chunks
+                vectors_and_weights.append((response.data[0].embedding, len(fragment)))
+            total_weight = sum(weight for _, weight in vectors_and_weights)
+            return [
+                sum(vector[dimension] * weight for vector, weight in vectors_and_weights) / total_weight
+                for dimension in range(len(vectors_and_weights[0][0]))
+            ]
 
     def _find_pdfs_in_directory(self, directory: str, recursive: bool = True) -> List[str]:
         """查找目录中的所有 PDF 文件。"""
@@ -304,23 +581,27 @@ class DocumentIngestionPipeline:
         content: str,
         chunks: List[DocumentChunk],
         metadata: Dict[str, Any],
+        pdf_bytes: Optional[bytes] = None,
     ) -> str:
         """将文档及其分块保存到 PostgreSQL。"""
         async with db_pool.acquire() as conn:
             async with conn.transaction():
                 document_result = await conn.fetchrow(
                     """
-                    INSERT INTO documents (title, source, content, metadata)
-                    VALUES ($1, $2, $3, $4)
+                    INSERT INTO documents (title, source, content, metadata, pdf_blob, pdf_media_type)
+                    VALUES ($1, $2, $3, $4, $5, 'application/pdf')
                     RETURNING id::text
                     """,
                     title,
                     source,
                     content,
-                    json.dumps(metadata),
+                    json.dumps(metadata, ensure_ascii=False),
+                    pdf_bytes,
                 )
 
                 document_id = document_result["id"]
+
+                await self._save_visual_artifacts(conn, document_id, chunks)
 
                 for chunk in chunks:
                     embedding_data = None
@@ -341,7 +622,7 @@ class DocumentIngestionPipeline:
                         chunk.content,
                         embedding_data,
                         chunk.index,
-                        json.dumps(chunk_metadata),
+                        json.dumps(chunk_metadata, ensure_ascii=False),
                         chunk.token_count if hasattr(chunk, "token_count") else len(chunk.content.split()),
                     )
 

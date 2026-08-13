@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode, urlparse
@@ -22,7 +23,9 @@ from .db_utils import (
 )
 from .models import ChunkResult, DocumentMetadata
 from .providers import build_embedding_request_kwargs, get_embedding_client, get_embedding_model
+from .embedding_runtime import EmbeddingLanguage, get_embedding_client_for_route, get_embedding_route
 from .cache_utils import cache_get_json, cache_set_json, make_cache_key
+from .query_translation_runtime import translate_query_to_english
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -37,7 +40,7 @@ DEFAULT_GENERAL_WEB_ENDPOINTS = {
     "tavily": "https://api.tavily.com/search",
     "serpapi": "https://serpapi.com/search.json",
     "brave": "https://api.search.brave.com/res/v1/web/search",
-    "bocha": "https://api.bochaai.com/v1/web-search",
+    "bocha": "https://api.bocha.cn/v1/web-search",
 }
 
 
@@ -71,21 +74,125 @@ async def generate_embedding(text: str) -> List[float]:
         raise
 
 
+def _normalize_embedding_language(value: Optional[str]) -> Optional[EmbeddingLanguage]:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"zh", "en"} else None
+
+
+async def generate_routed_embedding(
+    text: str,
+    embedding_language: Optional[str] = None,
+) -> tuple[List[float], str]:
+    """Embed a query with the same language-specific model used at ingestion."""
+    route = get_embedding_route(text, language=_normalize_embedding_language(embedding_language))
+    query_hash = hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
+    cache_key = make_cache_key("embedding", route.model, query_hash)
+    cached = await cache_get_json(cache_key)
+    if isinstance(cached, list) and cached:
+        return cached, route.language
+    response = await asyncio.wait_for(
+        get_embedding_client_for_route(route).embeddings.create(
+            **build_embedding_request_kwargs(model=route.model, input_value=text, encoding_format="float")
+        ),
+        timeout=EMBEDDING_TIMEOUT_SECONDS,
+    )
+    embedding = response.data[0].embedding
+    await cache_set_json(cache_key, embedding, EMBEDDING_CACHE_TTL_SECONDS)
+    return embedding, route.language
+
+
+async def generate_retrieval_routes(
+    query: str,
+    embedding_language: Optional[str] = None,
+) -> List[tuple[List[float], str, str]]:
+    """Return the primary route plus an English bridge for Chinese free-text queries."""
+    embedding, resolved_language = await generate_routed_embedding(query, embedding_language)
+    routes = [(embedding, resolved_language, query)]
+    if embedding_language is not None or resolved_language != "zh":
+        return routes
+
+    translated_query = await translate_query_to_english(query)
+    if not translated_query:
+        return routes
+    english_embedding, _ = await generate_routed_embedding(translated_query, "en")
+    return routes + [(english_embedding, "en", translated_query)]
+
+
+def merge_chunk_results(result_sets: List[List[ChunkResult]], limit: int) -> List[ChunkResult]:
+    """Deduplicate multi-route retrieval results while retaining their backend score."""
+    unique: Dict[str, ChunkResult] = {}
+    for results in result_sets:
+        for result in results:
+            existing = unique.get(result.chunk_id)
+            if existing is None or result.score > existing.score:
+                unique[result.chunk_id] = result
+    return sorted(unique.values(), key=lambda item: item.score, reverse=True)[:limit]
+
+
+def _to_chunk_results(rows: List[Dict[str, Any]], score_key: str) -> List[ChunkResult]:
+    return [
+        ChunkResult(
+            chunk_id=str(row["chunk_id"]),
+            document_id=str(row["document_id"]),
+            content=row["content"],
+            score=float(row.get(score_key, row.get("score", 0.0))),
+            metadata=row["metadata"],
+            document_title=row["document_title"],
+            document_source=row["document_source"],
+        )
+        for row in rows
+    ]
+
+
+def _expand_section_queries(section_query: str) -> List[str]:
+    """Split multi-section requests so each persisted section can be matched."""
+    value = str(section_query or "").strip()
+    if not value:
+        return [""]
+    candidates = [value]
+    normalized = value.lower()
+    known_sections = ("abstract", "introduction", "method", "algorithm", "experiment", "evaluation", "result", "conclusion", "reference")
+    candidates.extend(section for section in known_sections if re.search(rf"\b{section}\b", normalized))
+    candidates.extend(part.strip() for part in re.split(r"\s+(?:and|or)\s+|[,;/]", value, flags=re.IGNORECASE) if part.strip())
+
+    # Publishers use different front-matter labels for equivalent paper parts.
+    aliases = {
+        "abstract": ("summary", "executive summary"),
+        "introduction": ("motivation", "background"),
+        "method": ("methodology", "approach", "modeling"),
+        "experiment": ("evaluation", "results", "validation"),
+        "evaluation": ("experiment", "results", "validation"),
+        "result": ("results", "evaluation", "validation"),
+        "conclusion": ("conclusions", "discussion", "summary"),
+    }
+    for candidate in tuple(candidates):
+        candidate_normalized = candidate.strip().lower()
+        for canonical, equivalents in aliases.items():
+            if canonical in candidate_normalized:
+                candidates.extend(equivalents)
+    return list(dict.fromkeys(candidates))
+
+
 class VectorSearchInput(BaseModel):
     query: str = Field(..., description="Search query")
     limit: int = Field(default=10, description="Maximum number of results")
+    document_ids: Optional[List[str]] = Field(default=None, description="Optional document UUIDs to restrict search")
+    embedding_language: Optional[str] = Field(default=None, description="Corpus embedding language: zh or en")
 
 
 class HybridSearchInput(BaseModel):
     query: str = Field(..., description="Search query")
     limit: int = Field(default=10, description="Maximum number of results")
     text_weight: float = Field(default=0.3, description="Weight for text similarity (0-1)")
+    document_ids: Optional[List[str]] = Field(default=None, description="Optional document UUIDs to restrict search")
+    embedding_language: Optional[str] = Field(default=None, description="Corpus embedding language: zh or en")
 
 
 class SectionSearchInput(BaseModel):
     query: str = Field(..., description="Content query within the section")
     section_query: str = Field(..., description="Section title/path keyword, e.g. Method, Experiments, References")
     document_id: Optional[str] = Field(default=None, description="Optional document UUID to restrict search")
+    document_ids: Optional[List[str]] = Field(default=None, description="Optional document UUIDs to restrict search")
     limit: int = Field(default=10, ge=1, le=50)
 
 
@@ -94,7 +201,9 @@ class ArtifactSearchInput(BaseModel):
     limit: int = Field(default=10, ge=1, le=50)
     artifact_types: Optional[List[str]] = None
     document_id: Optional[str] = None
+    document_ids: Optional[List[str]] = None
     text_weight: float = Field(default=0.3, ge=0.0, le=1.0)
+    embedding_language: Optional[str] = None
 
 
 class DocumentInput(BaseModel):
@@ -159,16 +268,12 @@ def _decode_openalex_abstract(abstract_inverted_index: Optional[Dict[str, List[i
 
 
 def _extract_pdf_url(work: Dict[str, Any]) -> Optional[str]:
-    open_access = work.get("open_access") or {}
     best_oa = work.get("best_oa_location") or {}
     primary_location = work.get("primary_location") or {}
 
     for candidate in [
-        open_access.get("oa_url"),
         best_oa.get("pdf_url"),
-        best_oa.get("landing_page_url"),
         primary_location.get("pdf_url"),
-        primary_location.get("landing_page_url"),
     ]:
         if isinstance(candidate, str) and candidate.startswith("http"):
             return candidate
@@ -507,27 +612,22 @@ async def web_search_tool(input_data: WebSearchInput) -> List[Dict[str, Any]]:
 
 async def vector_search_tool(input_data: VectorSearchInput) -> List[ChunkResult]:
     try:
-        embedding = await generate_embedding(input_data.query)
+        routes = await generate_retrieval_routes(
+            input_data.query,
+            input_data.embedding_language,
+        )
     except Exception as e:
         logger.exception("Vector search embedding failed: %s", e)
         raise
     try:
-        results = await asyncio.wait_for(
-            vector_search(embedding=embedding, limit=input_data.limit),
-            timeout=LOCAL_SEARCH_TIMEOUT_SECONDS,
-        )
-        return [
-            ChunkResult(
-                chunk_id=str(r["chunk_id"]),
-                document_id=str(r["document_id"]),
-                content=r["content"],
-                score=r["similarity"],
-                metadata=r["metadata"],
-                document_title=r["document_title"],
-                document_source=r["document_source"],
+        result_sets = []
+        for embedding, embedding_language, _ in routes:
+            rows = await asyncio.wait_for(
+                vector_search(embedding=embedding, limit=input_data.limit, embedding_language=embedding_language, document_ids=input_data.document_ids),
+                timeout=LOCAL_SEARCH_TIMEOUT_SECONDS,
             )
-            for r in results
-        ]
+            result_sets.append(_to_chunk_results(rows, "similarity"))
+        return merge_chunk_results(result_sets, input_data.limit)
     except Exception as e:
         logger.exception("Vector search failed: %s", e)
         raise
@@ -535,32 +635,22 @@ async def vector_search_tool(input_data: VectorSearchInput) -> List[ChunkResult]
 
 async def hybrid_search_tool(input_data: HybridSearchInput) -> List[ChunkResult]:
     try:
-        embedding = await generate_embedding(input_data.query)
+        routes = await generate_retrieval_routes(
+            input_data.query,
+            input_data.embedding_language,
+        )
     except Exception as e:
         logger.exception("Hybrid search embedding failed: %s", e)
         raise
     try:
-        results = await asyncio.wait_for(
-            hybrid_search(
-                embedding=embedding,
-                query_text=input_data.query,
-                limit=input_data.limit,
-                text_weight=input_data.text_weight,
-            ),
-            timeout=LOCAL_SEARCH_TIMEOUT_SECONDS,
-        )
-        return [
-            ChunkResult(
-                chunk_id=str(r["chunk_id"]),
-                document_id=str(r["document_id"]),
-                content=r["content"],
-                score=r["combined_score"],
-                metadata=r["metadata"],
-                document_title=r["document_title"],
-                document_source=r["document_source"],
+        result_sets = []
+        for embedding, embedding_language, query_text in routes:
+            rows = await asyncio.wait_for(
+                hybrid_search(embedding=embedding, query_text=query_text, limit=input_data.limit, text_weight=input_data.text_weight, embedding_language=embedding_language, document_ids=input_data.document_ids),
+                timeout=LOCAL_SEARCH_TIMEOUT_SECONDS,
             )
-            for r in results
-        ]
+            result_sets.append(_to_chunk_results(rows, "combined_score"))
+        return merge_chunk_results(result_sets, input_data.limit)
     except Exception as e:
         logger.exception("Hybrid search failed: %s", e)
         raise
@@ -568,27 +658,14 @@ async def hybrid_search_tool(input_data: HybridSearchInput) -> List[ChunkResult]
 
 async def section_search_tool(input_data: SectionSearchInput) -> List[ChunkResult]:
     try:
-        results = await asyncio.wait_for(
-            section_search(
-                query_text=input_data.query,
-                section_query=input_data.section_query,
-                document_id=input_data.document_id,
-                limit=input_data.limit,
-            ),
-            timeout=LOCAL_SEARCH_TIMEOUT_SECONDS,
-        )
-        return [
-            ChunkResult(
-                chunk_id=str(r["chunk_id"]),
-                document_id=str(r["document_id"]),
-                content=r["content"],
-                score=float(r["combined_score"]),
-                metadata=r["metadata"],
-                document_title=r["document_title"],
-                document_source=r["document_source"],
+        result_sets = []
+        for section_query in _expand_section_queries(input_data.section_query):
+            rows = await asyncio.wait_for(
+                section_search(query_text=input_data.query, section_query=section_query, document_id=input_data.document_id, document_ids=input_data.document_ids, limit=input_data.limit),
+                timeout=LOCAL_SEARCH_TIMEOUT_SECONDS,
             )
-            for r in results
-        ]
+            result_sets.append(_to_chunk_results(rows, "combined_score"))
+        return merge_chunk_results(result_sets, input_data.limit)
     except Exception as e:
         logger.exception("Section search failed: %s", e)
         raise
@@ -605,35 +682,23 @@ async def artifact_search_tool(input_data: ArtifactSearchInput) -> List[ChunkRes
         normalized_types = ["table", "figure", "algorithm"]
 
     try:
-        embedding = await generate_embedding(input_data.query)
+        routes = await generate_retrieval_routes(
+            input_data.query,
+            input_data.embedding_language,
+        )
     except Exception as e:
         logger.exception("Artifact search embedding failed: %s", e)
         raise
 
     try:
-        results = await asyncio.wait_for(
-            artifact_search(
-                embedding=embedding,
-                query_text=input_data.query,
-                limit=input_data.limit,
-                artifact_types=normalized_types,
-                document_id=input_data.document_id,
-                text_weight=input_data.text_weight,
-            ),
-            timeout=LOCAL_SEARCH_TIMEOUT_SECONDS,
-        )
-        return [
-            ChunkResult(
-                chunk_id=str(r["chunk_id"]),
-                document_id=str(r["document_id"]),
-                content=r["content"],
-                score=float(r.get("combined_score", r.get("score", 0.0))),
-                metadata=r["metadata"],
-                document_title=r["document_title"],
-                document_source=r["document_source"],
+        result_sets = []
+        for embedding, embedding_language, query_text in routes:
+            rows = await asyncio.wait_for(
+                artifact_search(embedding=embedding, query_text=query_text, limit=input_data.limit, artifact_types=normalized_types, document_id=input_data.document_id, document_ids=input_data.document_ids, text_weight=input_data.text_weight, embedding_language=embedding_language),
+                timeout=LOCAL_SEARCH_TIMEOUT_SECONDS,
             )
-            for r in results
-        ]
+            result_sets.append(_to_chunk_results(rows, "combined_score"))
+        return merge_chunk_results(result_sets, input_data.limit)
     except Exception as e:
         logger.exception("Artifact search failed: %s", e)
         raise

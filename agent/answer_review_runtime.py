@@ -6,14 +6,6 @@ from typing import Any, Dict, List
 from evals.judges.answer_rubric import judge_answer_with_rubric
 
 
-_ALREADY_CAUTIONED_MARKERS = (
-    "当前检索片段未明确说明",
-    "仍需回到原文确认",
-    "仅基于当前检索片段",
-    "以上判断基于当前检索片段",
-)
-
-
 @dataclass
 class AnswerReviewRuntimeResult:
     reviewed: bool
@@ -32,33 +24,6 @@ def _normalize_source(source: Any) -> Dict[str, Any]:
     if isinstance(source, dict):
         return dict(source)
     return {}
-
-
-def _collect_caveat_fragments(notes: List[Dict[str, str]]) -> List[str]:
-    claim_types = {str(note.get("claim_type") or "") for note in notes}
-    fragments: List[str] = []
-    if "unsupported_numeric_claim" in claim_types:
-        fragments.append("具体数字/年份")
-    if "unsupported_mechanism_claim" in claim_types:
-        fragments.append("具体机制细节")
-    if "unsupported_external_fact" in claim_types:
-        fragments.append("外部来源或论文元数据")
-    if "assertion" in claim_types and not fragments:
-        fragments.append("部分结论表述")
-    return fragments
-
-
-def _build_runtime_caveat(notes: List[Dict[str, str]]) -> str:
-    fragments = _collect_caveat_fragments(notes)
-    if not fragments:
-        return "注：以上判断基于当前检索片段，仍需回到原文进一步确认。"
-    joined = "、".join(fragments)
-    return f"注：以上回答基于当前检索片段；其中涉及{joined}的内容，仍需回到原文进一步确认。"
-
-
-def _has_existing_caveat(answer: str) -> bool:
-    text = str(answer or "").strip()
-    return any(marker in text for marker in _ALREADY_CAUTIONED_MARKERS)
 
 
 def review_generated_answer(
@@ -116,24 +81,12 @@ def review_generated_answer(
             reason="未发现明显未支撑断言风险。",
         )
 
-    if _has_existing_caveat(text):
-        return AnswerReviewRuntimeResult(
-            reviewed=True,
-            approved=True,
-            revised_answer=text,
-            review_action="keep_existing_caveat",
-            unsupported_claim_risk=risk,
-            unsupported_claim_notes=notes,
-            reason="回答已包含证据边界提醒，不再重复追加。",
-        )
-
-    revised = f"{text}\n\n{_build_runtime_caveat(notes)}"
     return AnswerReviewRuntimeResult(
         reviewed=True,
         approved=True,
-        revised_answer=revised,
-        review_action="append_caveat",
+        revised_answer=text,
+        review_action="retain_with_metadata",
         unsupported_claim_risk=risk,
         unsupported_claim_notes=notes,
-        reason="检测到未支撑断言风险，已追加运行时证据边界提醒。",
+        reason="检测到未支撑断言风险，已记录到会话元数据供依据面板与调试使用。",
     )

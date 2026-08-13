@@ -39,7 +39,7 @@ def _build_test_app() -> FastAPI:
     async def chat():
         return {"accepted": True}
 
-    @app.post("/documents/upload")
+    @app.post("/ingestion/tasks")
     async def upload():
         return {"accepted": True}
 
@@ -170,7 +170,7 @@ def test_request_size_limit_rejects_oversized_upload_request(monkeypatch):
     app = _build_test_app()
     client = TestClient(app, raise_server_exceptions=False)
 
-    response = client.post("/documents/upload", json={"content_base64": "x" * 200})
+    response = client.post("/ingestion/tasks", json={"content_base64": "x" * 200})
 
     assert response.status_code == 413
     payload = response.json()

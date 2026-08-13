@@ -9,6 +9,8 @@
 
 # local smoke tests
 test_bocha.py
+Dockerfile.local-runtime
+*.docx
 
 # local documents / uploaded files
 documents/*
@@ -18,6 +20,7 @@ documents/*
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest-tmp*/
 .mypy_cache/
 .ruff_cache/
 
@@ -38,6 +41,7 @@ Thumbs.db
 # local virtualenv / temp
 .venv/
 .tmp/
+web/dist/
 
 test_logs/
 
@@ -58,6 +62,10 @@ evals/results/**
 !evals/results/real_chain_eval.md
 !evals/results/engineering_showcase_eval.md
 
+# Real batch-ingestion evaluation runs are local operational evidence.
+# Keep implementation code versioned; do not commit per-paper outputs or reports.
+evals/results/ingestion_batch_runs/
+
 # Local logs / cache
 test_logs/
 *.log
@@ -68,3 +76,9 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# Guard against accidental nested copies of the source packages.
+/agent/agent/
+/common/common/
+/ingestion/ingestion/
+/sql/sql/

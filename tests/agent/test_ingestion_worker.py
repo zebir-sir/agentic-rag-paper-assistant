@@ -77,6 +77,26 @@ async def test_task_not_found_skips_ingestion():
 
 
 @pytest.mark.asyncio
+async def test_task_waits_until_its_queue_turn():
+    with patch("agent.ingestion_worker.get_ingestion_task", new_callable=AsyncMock) as mock_get:
+        with patch("agent.ingestion_worker.list_ingestion_tasks", new_callable=AsyncMock) as mock_list:
+            with patch("agent.ingestion_worker.ingest_saved_pdf_file", new_callable=AsyncMock) as mock_ingest:
+                mock_get.return_value = {
+                    "task_id": "task-later", "status": "queued", "retry_count": 0,
+                    "file_path": "documents/ui_uploads/a/paper.pdf", "document_id": None, "queue_order": 2,
+                }
+                mock_list.return_value = [
+                    {"task_id": "task-first", "status": "queued"},
+                    {"task_id": "task-later", "status": "queued"},
+                ]
+                result = await handle_ingestion_message(
+                    {"task_id": "task-later", "file_path": "documents/ui_uploads/a/paper.pdf", "document_id": None}
+                )
+    assert result["action"] == "defer_until_turn"
+    mock_ingest.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_retry_when_failure_and_retry_not_reached():
     with patch("agent.ingestion_worker.get_ingestion_max_retries", return_value=3):
         with patch("agent.ingestion_worker.get_ingestion_task", new_callable=AsyncMock) as mock_get:
@@ -102,6 +122,31 @@ async def test_retry_when_failure_and_retry_not_reached():
                         assert result["action"] == "retry"
                         assert mock_update.await_args_list[1].kwargs["retry_count"] == 2
                         mock_publish.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_missing_document_id_is_not_marked_done():
+    with patch("agent.ingestion_worker.get_ingestion_max_retries", return_value=3):
+        with patch("agent.ingestion_worker.get_ingestion_task", new_callable=AsyncMock) as mock_get:
+            with patch("agent.ingestion_worker.update_ingestion_task_status", new_callable=AsyncMock) as mock_update:
+                with patch("agent.ingestion_worker.ingest_saved_pdf_file", new_callable=AsyncMock) as mock_ingest:
+                    with patch("agent.ingestion_worker.publish_ingestion_task", new_callable=AsyncMock):
+                        mock_get.return_value = {
+                            "task_id": "task-empty-id", "status": "queued", "retry_count": 0,
+                            "file_path": "documents/ui_uploads/a/paper.pdf", "document_id": None,
+                        }
+                        mock_ingest.return_value = {"document_id": None}
+                        mock_update.side_effect = [
+                            {"task_id": "task-empty-id", "status": "processing"},
+                            {"task_id": "task-empty-id", "status": "queued", "retry_count": 1},
+                        ]
+
+                        result = await process_rabbitmq_message(
+                            b'{"task_id":"task-empty-id","document_id":null,"file_path":"documents/ui_uploads/a/paper.pdf"}'
+                        )
+
+    assert result["action"] == "retry"
+    assert "persisted document ID" in mock_update.await_args_list[1].kwargs["error_message"]
 
 
 @pytest.mark.asyncio
