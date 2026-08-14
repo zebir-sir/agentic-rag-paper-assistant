@@ -234,7 +234,20 @@ OpenAlex 与通用网页检索是独立可选能力。未配置通用网页检�
 
 ### 2. 日常启动：复用已有依赖
 
-先确认现有镜像与前端依赖：
+已完成首次部署后，可以直接一键启动：
+
+```powershell
+Set-Location D:\agent\agentic_rag_project-main2
+python run.py
+```
+
+脚本只检查并复用已有镜像与 `web/node_modules`，按安全顺序启动基础服务、API、入库 worker 和本地 Vite 前端。API 与 worker 会显式挂载当前源码，避免本地代码与旧 runtime 镜像不一致；不会执行 `build`、`pull`、`npm install` 或 `npm ci`。启动前检查可使用：
+
+```powershell
+python run.py --check
+```
+
+手动启动时，先确认现有镜像与前端依赖：
 
 ```powershell
 Set-Location D:\agent\agentic_rag_project-main2
@@ -386,7 +399,9 @@ agentic_rag_project-main2/
 ├── evals/                             # 评测脚本、金标与本地产物
 ├── tests/                             # 单元与运行时测试
 ├── sql/                               # 数据库 schema
+├── run.py                             # 本地一键启动与前置条件检查
 ├── docker-compose.yml
+├── docker-compose.dev.yml              # 显式启用的本地源码挂载与 API 热重载
 └── README.md
 ```
 
