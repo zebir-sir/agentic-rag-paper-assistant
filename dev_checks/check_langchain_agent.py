@@ -69,14 +69,9 @@ async def main() -> None:
 
     api_text = Path("agent/api.py").read_text(encoding="utf-8")
     assert "build_langchain_agent" not in api_text, "api.py should not contain build_langchain_agent"
-    assert "run_langchain_agent" not in api_text, "api.py should not contain run_langchain_agent"
-
-    runner_text = Path("agent/agent_runner.py").read_text(encoding="utf-8")
-    assert "run_pydantic_agent" in runner_text, "agent_runner should still include run_pydantic_agent"
-    assert "iter_pydantic_agent" in runner_text, "agent_runner should still include iter_pydantic_agent"
-
-    agent_text = Path("agent/agent.py").read_text(encoding="utf-8")
-    assert "rag_agent = Agent" in agent_text, "agent.py must still contain rag_agent = Agent"
+    assert "run_langchain_agent" in api_text, "api.py should use the current LangChain runtime"
+    assert "agent_runner" not in api_text, "api.py should not retain the removed backend switch"
+    assert not Path("agent/agent.py").exists(), "removed PydanticAI agent runtime should not return"
 
     print("check_langchain_agent passed")
 

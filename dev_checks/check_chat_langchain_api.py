@@ -77,7 +77,7 @@ def require_chat_shape(data: Dict[str, Any], tag: str) -> None:
     if metadata.get("agent_backend") != "langchain":
         fail(
             f"{tag}: metadata.agent_backend={metadata.get('agent_backend')!r}, expected 'langchain'. "
-            "请确认 .env 中 AGENT_BACKEND=langchain 并已重启容器。"
+            "请确认 API 已挂载并运行当前仓库源码。"
         )
 
 

@@ -52,13 +52,12 @@ def main() -> None:
     collect_evidence_hit(deps, hit)
     assert len(deps.retrieved_sources) == 1, "duplicate hit should be de-duplicated"
 
-    agent_text = Path("agent/agent.py").read_text(encoding="utf-8")
-    assert "@dataclass\nclass AgentDependencies" not in agent_text, "agent.py still contains dataclass AgentDependencies"
-    assert "class AgentDependencies:" not in agent_text, "agent.py still defines AgentDependencies"
+    assert not Path("agent/agent.py").exists(), "removed PydanticAI agent runtime should not return"
 
     api_text = Path("agent/api.py").read_text(encoding="utf-8")
     forbidden_snippets = [
         "from .agent import rag_agent",
+        "from .agent_runner import",
         "rag_agent.run",
         "rag_agent.iter",
     ]

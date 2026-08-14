@@ -175,6 +175,37 @@ function Workspace({ state, setState, initialPrompt, clearInitialPrompt, onSessi
     setState((current) => ({ ...current, messages: [...current.messages, userMessage, assistantMessage], isStreaming: true, streamingMessageId: assistantMessage.id }));
     const controller = new AbortController();
     controllerRef.current = controller;
+    const pendingEvents = [];
+    let flushTimer = null;
+    const flushEvents = () => {
+      if (flushTimer !== null) {
+        window.clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      const events = pendingEvents.splice(0);
+      if (!events.length) return;
+      setState((current) => {
+        let activeSessionId = current.activeSessionId;
+        const messages = current.messages.map((item) => {
+          if (item.id !== assistantMessage.id) return item;
+          return events.reduce((next, eventData) => {
+            const eventType = eventData.type || "";
+            if (eventData.session_id) activeSessionId = eventData.session_id;
+            if (eventType === "text") return { ...next, content: `${next.content}${eventData.content || ""}` };
+            if (eventType === "sources") return { ...next, sources: eventData.sources || next.sources };
+            if (eventType === "status" && eventData.user_visible !== false) return { ...next, status: eventData.content || next.status };
+            if (eventType === "error") return { ...next, error: eventData.content || "请求失败" };
+            return next;
+          }, item);
+        });
+        return { ...current, messages, activeSessionId };
+      });
+    };
+    const queueEvent = (eventData) => {
+      pendingEvents.push(eventData);
+      if (flushTimer !== null) return;
+      flushTimer = window.setTimeout(flushEvents, 50);
+    };
     try {
       await streamChat(state.config.apiUrl, {
         message,
@@ -188,23 +219,12 @@ function Workspace({ state, setState, initialPrompt, clearInitialPrompt, onSessi
         },
       }, {
         signal: controller.signal,
-        onEvent: (eventData) => {
-          setState((current) => {
-            const eventType = eventData.type || "";
-            const messages = current.messages.map((item) => item.id !== assistantMessage.id ? item : {
-              ...item,
-              content: eventType === "text" ? `${item.content}${eventData.content || ""}` : item.content,
-              sources: eventType === "sources" ? (eventData.sources || item.sources) : item.sources,
-              status: eventType === "status" && eventData.user_visible !== false ? (eventData.content || item.status) : item.status,
-              error: eventType === "error" ? (eventData.content || "请求失败") : item.error,
-            });
-            return { ...current, messages, activeSessionId: eventData.session_id || current.activeSessionId };
-          });
-        },
+        onEvent: queueEvent,
       });
     } catch (error) {
       if (error.name !== "AbortError") setState((current) => ({ ...current, messages: current.messages.map((item) => item.id === assistantMessage.id ? { ...item, content: `回答失败：${error.message}` } : item) }));
     } finally {
+      flushEvents();
       controllerRef.current = null;
       setState((current) => ({ ...current, isStreaming: false, streamingMessageId: null }));
       onSessionChanged?.();

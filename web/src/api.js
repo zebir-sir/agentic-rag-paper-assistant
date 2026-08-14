@@ -30,6 +30,7 @@ export const api = {
   artifact: (baseUrl, id) => request(baseUrl, `/artifacts/${id}`),
   artifactImageUrl: (baseUrl, id) => `${normalizeApiUrl(baseUrl)}/artifacts/${id}/image`,
   documentPdfUrl: (baseUrl, id) => `${normalizeApiUrl(baseUrl)}/documents/${id}/pdf`,
+  documentPdfPageImageUrl: (baseUrl, id, page) => `${normalizeApiUrl(baseUrl)}/documents/${id}/pdf/pages/${page}/image`,
   translateDocument: (baseUrl, id, language) => request(baseUrl, `/documents/${id}/translations/${language}`, { method: "POST" }),
   translateSelection: (baseUrl, id, language, payload) => request(baseUrl, `/documents/${id}/selection-translations/${language}`, { method: "POST", body: JSON.stringify(payload) }),
   annotations: (baseUrl, id) => request(baseUrl, `/documents/${id}/annotations`),

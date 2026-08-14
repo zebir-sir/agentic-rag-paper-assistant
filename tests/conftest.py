@@ -66,27 +66,6 @@ def mock_llm_model():
 
 
 @pytest.fixture
-def mock_pydantic_agent():
-    """Mock PydanticAI Agent object."""
-    with patch("pydantic_ai.Agent") as mock_agent_class:
-        mock_agent = AsyncMock()
-
-        mock_result = Mock()
-        mock_result.data = "Mocked agent response"
-        mock_result.tool_calls.return_value = []
-        mock_agent.run = AsyncMock(return_value=mock_result)
-
-        # Mock agent.iter for streaming tests
-        mock_run_context = AsyncMock()
-        mock_run_context.__aenter__ = AsyncMock(return_value=mock_run_context)
-        mock_run_context.__aexit__ = AsyncMock(return_value=None)
-        mock_agent.iter.return_value = mock_run_context
-
-        mock_agent_class.return_value = mock_agent
-        yield mock_agent
-
-
-@pytest.fixture
 def temp_documents_dir():
     """Create a temporary document directory for tests."""
     with tempfile.TemporaryDirectory() as temp_dir:

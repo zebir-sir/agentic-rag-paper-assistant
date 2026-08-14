@@ -24,17 +24,11 @@ from .runtime_models import HttpMetricsSnapshot, RuntimeDiagnostics
 from .chat_metrics_models import ChatMetricsSnapshot
 from .chat_metrics_runtime import get_chat_metrics_snapshot, record_chat_request_metric
 from .agent_runtime import AgentDependencies
-from .agent_runner import (
-    run_agent,
-    iter_agent,
-    is_model_request_node,
-    get_agent_backend,
-    get_stream_backend,
-)
 from .agent_langgraph import run_langgraph_analysis
 from .retrieval_harness_runtime import build_retrieval_harness_trace_payload
 from .agent_langchain import (
     GENERATION_RETRY_FAILED_MESSAGE,
+    run_langchain_agent,
     stream_langchain_agent,
     iter_langchain_agent_stream,
     get_langchain_chat_model,
@@ -76,6 +70,8 @@ from .db_utils import (
     update_document_annotation_position,
     delete_document_annotation,
 )
+from .pdf_page_renderer import render_cached_pdf_page_png
+from .translation_error_policy import is_translation_service_unavailable
 from .app_config import get_rabbitmq_url
 from .openalex_router import _is_openalex_enabled
 from .ingestion_tasks_db import (
@@ -168,6 +164,7 @@ LANGGRAPH_ANALYSIS_TIMEOUT_SECONDS = float(os.getenv("LANGGRAPH_ANALYSIS_TIMEOUT
 NON_STREAM_FALLBACK_TIMEOUT_SECONDS = float(os.getenv("NON_STREAM_FALLBACK_TIMEOUT_SECONDS", "35"))
 LIGHTWEIGHT_CHAT_TIMEOUT_SECONDS = float(os.getenv("LIGHTWEIGHT_CHAT_TIMEOUT_SECONDS", "15"))
 RABBITMQ_URL = get_rabbitmq_url()
+AGENT_RUNTIME_BACKEND = "langchain"
 
 
 logging.basicConfig(
@@ -278,12 +275,6 @@ def _normalize_web_unavailable_reply(
     return response
 
 
-def _get_pydantic_stream_event_types():
-    from pydantic_ai.messages import PartStartEvent, PartDeltaEvent, TextPartDelta
-
-    return PartStartEvent, PartDeltaEvent, TextPartDelta
-
-
 def _should_retry_stream_answer(
     full_response: str,
     sources: List[EvidenceSource],
@@ -390,6 +381,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+PDF_PAGE_RENDER_SEMAPHORE = asyncio.Semaphore(2)
 register_http_middleware(app)
 register_exception_handlers(app)
 
@@ -498,70 +491,6 @@ async def _prepare_agent_prompt(
     }
 
 
-def extract_tool_calls(result) -> List[ToolCall]:
-    tools_used: List[ToolCall] = []
-    try:
-        messages = result.all_messages()
-        for message in messages:
-            if not hasattr(message, "parts"):
-                continue
-            for part in message.parts:
-                if part.__class__.__name__ != "ToolCallPart":
-                    continue
-                try:
-                    tool_name = str(part.tool_name) if hasattr(part, "tool_name") else "unknown"
-                    tool_args: Dict[str, Any] = {}
-                    if hasattr(part, "args") and part.args is not None:
-                        if isinstance(part.args, str):
-                            try:
-                                tool_args = json.loads(part.args)
-                            except json.JSONDecodeError:
-                                tool_args = {}
-                        elif isinstance(part.args, dict):
-                            tool_args = part.args
-                    tool_call_id = (
-                        str(part.tool_call_id) if hasattr(part, "tool_call_id") and part.tool_call_id else None
-                    )
-                    tools_used.append(
-                        ToolCall(tool_name=tool_name, args=tool_args, tool_call_id=tool_call_id)
-                    )
-                except Exception as e:
-                    logger.debug(f"Failed to parse tool call part: {e}")
-                    continue
-    except Exception as e:
-        logger.warning(f"Failed to extract tool calls: {e}")
-    return tools_used
-
-
-def extract_evidence_sources(
-    deps: AgentDependencies,
-    local_limit: int = 3,
-    web_limit: int = 3,
-) -> List[EvidenceSource]:
-    all_sources = list(getattr(deps, "retrieved_sources", []) or [])
-
-    normalized: List[EvidenceSource] = []
-    for source in all_sources:
-        source_type = str(getattr(source, "source_type", "") or "").lower()
-        if source_type not in {"local", "web", "artifact"}:
-            meta_type = str((source.metadata or {}).get("source_type") or "").lower()
-            source_type = "web" if meta_type == "web" else "artifact" if meta_type in {"artifact", "local_artifact"} or str((source.metadata or {}).get("content_type") or "").lower() == "artifact" else "local"
-            source.source_type = source_type
-        normalized.append(source)
-
-    local_sources = [s for s in normalized if s.source_type == "local"]
-    artifact_sources = [s for s in normalized if s.source_type == "artifact"]
-    web_sources = [s for s in normalized if s.source_type == "web"]
-
-    local_sources.sort(key=lambda s: (s.score is not None, s.score if s.score is not None else -1), reverse=True)
-    web_sources.sort(
-        key=lambda s: ((s.metadata or {}).get("cited_by_count") or -1),
-        reverse=True,
-    )
-
-    return artifact_sources[:local_limit] + local_sources[:local_limit] + web_sources[:web_limit]
-
-
 def _count_source_types(sources: List[EvidenceSource]) -> tuple[int, int]:
     local_source_count = 0
     web_source_count = 0
@@ -639,14 +568,6 @@ async def save_conversation_turn(
 def _resolve_search_type(search_type: Any) -> str:
     value = str(search_type).lower().strip()
     return "vector" if value == "vector" else "hybrid"
-
-
-def _is_langchain_agent_result(result: Any) -> bool:
-    return (
-        hasattr(result, "message")
-        and hasattr(result, "tools_used")
-        and hasattr(result, "sources")
-    )
 
 
 @dataclass
@@ -811,8 +732,7 @@ async def execute_prepared_chat_runtime(
     save_conversation: bool = True,
 ) -> tuple[str, List[ToolCall], bool, List[EvidenceSource], str, str, Dict[str, Any]]:
     try:
-        backend = get_agent_backend()
-        response_backend = backend
+        response_backend = AGENT_RUNTIME_BACKEND
         workflow_metadata: Dict[str, Any] = {}
         deps = runtime.deps
         compression_used = runtime.compression_used
@@ -841,7 +761,7 @@ async def execute_prepared_chat_runtime(
             workflow_metadata = dict(simple_chat_result.metadata or {})
             response_backend = "simple_chat_runtime"
         else:
-            if runtime.use_react and backend == "langchain":
+            if runtime.use_react:
                 graph_result = await run_langgraph_analysis(
                     question=message,
                     deps=deps,
@@ -853,21 +773,16 @@ async def execute_prepared_chat_runtime(
                 workflow_metadata = dict(getattr(graph_result, "metadata", {}) or {})
                 response_backend = "langgraph"
             else:
-                result = await run_agent(runtime.full_prompt, deps=deps)
-                if _is_langchain_agent_result(result):
-                    response = str(getattr(result, "message", "") or "")
-                    tools_used = list(getattr(result, "tools_used", []) or [])
-                    sources = list(getattr(result, "sources", []) or [])
-                    if is_degenerate_answer(response):
-                        logger.warning("Detected degenerate answer in /chat normal path; retrying once.")
-                        retry_result = await retry_langchain_agent_after_degenerate(runtime.full_prompt, deps)
-                        response = str(getattr(retry_result, "message", "") or "")
-                        tools_used = list(getattr(retry_result, "tools_used", []) or [])
-                        sources = list(getattr(retry_result, "sources", []) or [])
-                else:
-                    response = str(result.output)
-                    tools_used = extract_tool_calls(result)
-                    sources = extract_evidence_sources(deps)
+                result = await run_langchain_agent(runtime.full_prompt, deps=deps)
+                response = str(getattr(result, "message", "") or "")
+                tools_used = list(getattr(result, "tools_used", []) or [])
+                sources = list(getattr(result, "sources", []) or [])
+                if is_degenerate_answer(response):
+                    logger.warning("Detected degenerate answer in /chat normal path; retrying once.")
+                    retry_result = await retry_langchain_agent_after_degenerate(runtime.full_prompt, deps)
+                    response = str(getattr(retry_result, "message", "") or "")
+                    tools_used = list(getattr(retry_result, "tools_used", []) or [])
+                    sources = list(getattr(retry_result, "sources", []) or [])
 
         strict_langgraph_scope = (
             response_backend == "langgraph"
@@ -989,7 +904,7 @@ async def execute_prepared_chat_runtime(
                     "compression_used": False,
                     "requested_search_type": runtime.requested_search_type,
                     "effective_search_type": runtime.effective_search_type,
-                    "agent_backend": get_agent_backend(),
+                    "agent_backend": AGENT_RUNTIME_BACKEND,
                 },
                 assistant_metadata={
                     "error": str(e),
@@ -997,7 +912,7 @@ async def execute_prepared_chat_runtime(
                     "requested_search_type": runtime.requested_search_type,
                     "effective_search_type": runtime.effective_search_type,
                     "sources": [],
-                    "agent_backend": get_agent_backend(),
+                    "agent_backend": AGENT_RUNTIME_BACKEND,
                 },
             )
 
@@ -1007,7 +922,7 @@ async def execute_prepared_chat_runtime(
             False,
             [],
             runtime.effective_search_type,
-            get_agent_backend(),
+            AGENT_RUNTIME_BACKEND,
             {},
         )
 
@@ -1159,7 +1074,7 @@ async def chat(request: ChatRequest):
             session_id=session_id,
             route="/chat",
             status="error",
-            response_backend=get_agent_backend(),
+            response_backend=AGENT_RUNTIME_BACKEND,
             requested_search_type=_resolve_search_type(request.search_type),
             effective_search_type=_resolve_search_type(request.search_type),
             use_web_search=bool(request.use_web_search),
@@ -1182,8 +1097,8 @@ async def chat_stream(request: ChatRequest):
 
         async def generate_stream():
             full_response = ""
-            stream_backend = get_stream_backend()
-            response_backend = get_agent_backend()
+            stream_backend = AGENT_RUNTIME_BACKEND
+            response_backend = AGENT_RUNTIME_BACKEND
             workflow_metadata: Dict[str, Any] = {}
             tools_used: List[ToolCall] = []
             sources: List[EvidenceSource] = []
@@ -1223,7 +1138,7 @@ async def chat_stream(request: ChatRequest):
                         "prepare_chat_runtime",
                         session_id,
                         bool(getattr(request, "use_react", False)),
-                        get_agent_backend(),
+                        AGENT_RUNTIME_BACKEND,
                         STREAM_PREPARE_TIMEOUT_SECONDS,
                     )
                     yield sse_event(
@@ -1411,14 +1326,31 @@ async def chat_stream(request: ChatRequest):
                     user_visible=True,
                     level="info",
                 )
-                if use_react and get_agent_backend() == "langchain":
+                if use_react:
                     progress_queue: asyncio.Queue[Any] = asyncio.Queue()
                     streamed_answer_parts: List[str] = []
+                    answer_delta_count = 0
+                    last_answer_delta_at: Optional[float] = None
+                    max_answer_delta_gap_seconds = 0.0
 
                     async def progress_callback(msg: Any) -> None:
                         await progress_queue.put(msg)
 
                     async def answer_callback(content: str) -> None:
+                        nonlocal answer_delta_count, last_answer_delta_at, max_answer_delta_gap_seconds
+                        now = asyncio.get_running_loop().time()
+                        if last_answer_delta_at is not None:
+                            gap_seconds = now - last_answer_delta_at
+                            max_answer_delta_gap_seconds = max(max_answer_delta_gap_seconds, gap_seconds)
+                            if gap_seconds >= 2.0:
+                                logger.info(
+                                    "stream answer delta gap: session_id=%s run_id=%s gap_ms=%.0f",
+                                    session_id,
+                                    run_id,
+                                    gap_seconds * 1000,
+                                )
+                        last_answer_delta_at = now
+                        answer_delta_count += 1
                         await progress_queue.put({"type": "answer_delta", "content": content})
 
                     graph_task = asyncio.create_task(
@@ -1494,6 +1426,8 @@ async def chat_stream(request: ChatRequest):
                     tools_used = list(getattr(graph_result, "tools_used", []) or [])
                     sources = list(getattr(graph_result, "sources", []) or [])
                     workflow_metadata = dict(getattr(graph_result, "metadata", {}) or {})
+                    workflow_metadata["stream_answer_delta_count"] = answer_delta_count
+                    workflow_metadata["stream_max_answer_delta_gap_ms"] = round(max_answer_delta_gap_seconds * 1000)
                     response_backend = "langgraph"
                     full_response = clean_legacy_warning_text(
                         full_response,
@@ -1505,8 +1439,7 @@ async def chat_stream(request: ChatRequest):
                     elif full_response.startswith(streamed_answer) and len(full_response) > len(streamed_answer):
                         yield sse_event("text", content=full_response[len(streamed_answer):])
                     stream_backend = "langgraph"
-                elif stream_backend == "langchain":
-                    used_langchain_stream = True
+                else:
                     yield sse_event("status", content="Relevant passages found. Generating answer...")
                     stream_start = asyncio.get_running_loop().time()
                     got_first_text = False
@@ -1579,31 +1512,6 @@ async def chat_stream(request: ChatRequest):
                             full_response = str(getattr(stream_result, "message", "") or "")
                         tools_used = list(getattr(stream_result, "tools_used", []) or [])
                         sources = list(getattr(stream_result, "sources", []) or [])
-                else:
-                    used_langchain_stream = False
-                    PartStartEvent, PartDeltaEvent, TextPartDelta = _get_pydantic_stream_event_types()
-                    async with iter_agent(full_prompt, deps=deps) as run:
-                        async for node in run:
-                            if is_model_request_node(node):
-                                async with node.stream(run.ctx) as request_stream:
-                                    async for event in request_stream:
-                                        if isinstance(event, PartStartEvent) and event.part.part_kind == "text":
-                                            delta_content = event.part.content
-                                            yield (
-                                                sse_event("text", content=delta_content)
-                                            )
-                                            full_response += delta_content
-                                        elif isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
-                                            delta_content = event.delta.content_delta
-                                            yield (
-                                                sse_event("text", content=delta_content)
-                                            )
-                                            full_response += delta_content
-
-                    result = run.result
-                    tools_used = extract_tool_calls(result)
-                    sources = extract_evidence_sources(deps)
-
                 should_retry = False
                 if stream_backend == "langchain" and not use_react:
                     should_retry, retry_reason = _should_retry_stream_answer(
@@ -2009,6 +1917,28 @@ async def get_document_pdf_endpoint(document_id: str):
     return Response(content=pdf["content"], media_type=pdf["media_type"])
 
 
+@app.get("/documents/{document_id}/pdf/pages/{page_number}/image")
+async def get_document_pdf_page_image_endpoint(document_id: str, page_number: int):
+    """Serve a stable raster page while the browser keeps PDF.js text selection."""
+    pdf = await get_document_pdf(document_id)
+    if not pdf:
+        raise HTTPException(status_code=404, detail="PDF source is unavailable for this document")
+    try:
+        async with PDF_PAGE_RENDER_SEMAPHORE:
+            image = await asyncio.to_thread(
+                render_cached_pdf_page_png,
+                pdf["content"],
+                document_id,
+                page_number,
+            )
+    except (IndexError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("PDF page rasterization failed for %s page %s", document_id, page_number)
+        raise HTTPException(status_code=500, detail="PDF page rendering failed") from exc
+    return Response(content=image, media_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
+
+
 @app.post("/documents/{document_id}/translations/{target_language}")
 async def translate_document_endpoint(document_id: str, target_language: str):
     try:
@@ -2018,8 +1948,10 @@ async def translate_document_endpoint(document_id: str, target_language: str):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        logger.error("Document translation failed for %s: %s", document_id, exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.exception("Document translation failed for %s", document_id)
+        if is_translation_service_unavailable(exc):
+            raise HTTPException(status_code=503, detail="翻译模型服务暂时不可用，请稍后重试。") from exc
+        raise HTTPException(status_code=500, detail="翻译处理失败") from exc
 
 
 @app.post("/documents/{document_id}/selection-translations/{target_language}")
@@ -2037,8 +1969,10 @@ async def translate_selection_endpoint(document_id: str, target_language: str, p
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        logger.error("Selection translation failed for %s: %s", document_id, exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.exception("Selection translation failed for %s", document_id)
+        if is_translation_service_unavailable(exc):
+            raise HTTPException(status_code=503, detail="翻译模型服务暂时不可用，请稍后重试。") from exc
+        raise HTTPException(status_code=500, detail="翻译处理失败") from exc
 
 
 @app.post("/documents/{document_id}/translations/{target_language}/stream")

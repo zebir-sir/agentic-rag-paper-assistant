@@ -126,7 +126,6 @@ Streaming Answer + Evidence Sources
 | Frontend | React + Vite + Three.js |
 | Backend | FastAPI, SSE |
 | Agent Workflow | LangChain, LangGraph |
-| Optional Agent Runtime | Pydantic AI |
 | Vector Store | PostgreSQL + pgvector |
 | Text Search | PostgreSQL hybrid search / pg_trgm 思路 |
 | PDF Parsing | Docling |
@@ -141,15 +140,17 @@ Streaming Answer + Evidence Sources
 
 | 指标 | 当前结果 |
 |---|---:|
-| 测试结果 | 130 tests passed |
-| 入库论文 | 3 documents |
-| 索引分块 | 476 chunks |
+| 当前评测语料 | 46 篇 RRT 及相关路径规划论文 |
+| 入库论文 | 46 documents |
+| 索引分块 | 5,467 chunks |
 | 章节 metadata 覆盖率 | 100% |
 | 行号 metadata 覆盖率 | 100% |
-| Artifact chunks | 147 |
+| Artifact chunks | 1,204 |
+| 图谱节点 / 关系边 | 46 / 430 |
+| 已知论文 Hybrid Hit@1 / Hit@5 | 91.3% / 93.5% |
 | Source Policy 当前评测 | 0 source-boundary violations |
 
-这些指标用于展示项目的工程质量，不作为大规模公开 benchmark 宣称。
+上述语料指标来自 RRT/路径规划案例库，完整口径见 `docs/CORPUS_EVALUATION_46.md`；它们用于展示项目的工程质量，不作为大规模公开 benchmark 宣称。
 
 ## 7. 评测体系概览
 

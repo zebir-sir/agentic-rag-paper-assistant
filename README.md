@@ -37,6 +37,8 @@
 
 ![PaperWeave workspace](docs/assets/chat-research-workspace.png)
 
+[观看完整功能演示（静音，约 88 秒）](docs/assets/paperweave-demo.mp4)
+
 ## 📌 项目简介
 
 **PaperWeave** 是面向个人研究型用户的长期论文知识空间：研究者不是“上传一篇、问一个问题”，而是持续把文献沉淀为可阅读、可关联、可检索、可追问的个人研究网络。
@@ -195,7 +197,7 @@ flowchart LR
 |---|---|
 | 前端 | React 19、Vite、Lucide、PDF.js、Three.js |
 | 后端 | FastAPI、Uvicorn、SSE、Pydantic |
-| Agent 与模型接入 | LangChain、LangGraph、Pydantic AI、OpenAI-compatible API |
+| Agent 与模型接入 | LangChain、LangGraph、OpenAI-compatible API |
 | 文档解析 | Docling、PDFium fallback、可选视觉分析适配器 |
 | 存储与检索 | PostgreSQL 17、pgvector、pg_trgm |
 | 任务与缓存 | RabbitMQ 异步入库队列与 worker 调度；Redis 查询 embedding 缓存、限流支持与可用性降级 |
@@ -265,6 +267,13 @@ docker compose up -d --no-build ingestion-worker
 
 Set-Location .\web
 npm run dev -- --host 0.0.0.0 --port 5174
+```
+
+需要 API 热重载或源码挂载时，再显式加载 `docker-compose.dev.yml`；它仅用于本地开发，普通启动和部署使用基础 Compose 文件：
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --no-build api
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --no-build ingestion-worker
 ```
 
 存在镜像和 `node_modules` 时，不要执行 `docker compose build`、`docker compose up --build`、`npm install` 或 `npm ci`。只有确认对应依赖不存在时，才进行首次构建或下载。
