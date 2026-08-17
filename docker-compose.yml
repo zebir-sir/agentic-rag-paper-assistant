@@ -51,6 +51,8 @@ services:
       context: .
       dockerfile: Dockerfile
       target: runtime
+      args:
+        PYPI_INDEX_URL: ${PYPI_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
     container_name: agent_api_main1
     command: uvicorn agent.api:app --host ${APP_HOST} --port ${APP_PORT}
     ports:
@@ -101,6 +103,8 @@ services:
       context: .
       dockerfile: Dockerfile
       target: web
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
     container_name: agent_web_main1
     ports:
       - "5174:5173"

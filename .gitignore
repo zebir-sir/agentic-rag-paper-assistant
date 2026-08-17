@@ -7,6 +7,9 @@
 .vscode/
 .idea/
 
+# Legacy local dependency exports. pyproject.toml is the single dependency source.
+requirements/
+
 # local smoke tests
 test_bocha.py
 Dockerfile.local-runtime

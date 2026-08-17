@@ -299,7 +299,7 @@ docker compose logs --tail=20 ingestion-worker
 
 ### 4. 首次部署：干净机器从零启动
 
-首次从 GitHub 克隆后，不需要预先安装 Python 或 Node.js；Docker Compose 会从仓库中的 `Dockerfile` 和锁定的 `web/package-lock.json` 构建运行环境。复制 `.env.example` 并填入真实模型配置后执行：
+首次从 GitHub 克隆后，不需要预先安装 Python 或 Node.js；Docker Compose 会从仓库中的 `pyproject.toml` 和锁定的 `web/package-lock.json` 构建运行环境。复制 `.env.example` 并填入真实模型配置后执行：
 
 ```powershell
 Set-Location <cloned-repository>
@@ -311,6 +311,8 @@ docker compose up -d
 ```
 
 API 与 ingestion worker 始终共用 `agentic-rag-project-main2-runtime:latest`：先构建 `api`，再由 worker 复用该镜像，不会创建第二套 Python、Torch 或 Docling 依赖。首次运行会下载镜像层和 Docling/Hugging Face 所需模型；后续保留 `agentic_rag_project-main2_huggingface_cache_main2` 卷即可复用缓存。
+
+Dockerfile 默认使用清华 PyPI 和 npmmirror；API 与 worker 默认使用 `hf-mirror.com`。三者均可在 `.env` 中通过 `PYPI_INDEX_URL`、`NPM_REGISTRY` 和 `HF_ENDPOINT` 覆盖，便于不同网络环境部署。
 
 `docker-compose.dev.yml` 仅用于需要源码挂载和 API 热重载的本地开发，不会在普通部署中自动生效：
 
