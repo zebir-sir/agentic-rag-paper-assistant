@@ -314,6 +314,8 @@ API 与 ingestion worker 始终共用 `agentic-rag-project-main2-runtime:latest`
 
 Dockerfile 默认使用清华 PyPI 和 npmmirror；API 与 worker 默认使用 `hf-mirror.com`。三者均可在 `.env` 中通过 `PYPI_INDEX_URL`、`NPM_REGISTRY` 和 `HF_ENDPOINT` 覆盖，便于不同网络环境部署。
 
+`python run.py` 是已有镜像和 `web/node_modules` 后使用的本地开发启动脚本，不是首次部署入口。干净机器请始终先完成本节的 `docker compose build api web`，再执行 `docker compose up -d`。
+
 `docker-compose.dev.yml` 仅用于需要源码挂载和 API 热重载的本地开发，不会在普通部署中自动生效：
 
 ```powershell

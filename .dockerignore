@@ -9,6 +9,7 @@ __pycache__/
 *.pyd
 *.log
 .env
+requirements/
 documents/
 documents_retry/
 *.pdf
