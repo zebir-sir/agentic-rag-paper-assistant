@@ -53,6 +53,10 @@ documents_retry/
 documents/
 *.pdf
 
+# Personal interview study material; not part of the project deliverables.
+docs/generate_interview_handbook_template.py
+docs/generate_interview_study_doc.py
+
 # Eval raw outputs
 evals/results/**
 !evals/results/
