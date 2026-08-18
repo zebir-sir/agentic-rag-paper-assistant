@@ -23,7 +23,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
@@ -47,10 +47,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Check first-deploy contract
         run: python dev_checks/check_first_deploy_contract.py
+
+      - name: Provide example environment for Compose validation
+        run: cp .env.example .env
 
       - name: Validate Compose configuration
         run: docker compose --env-file .env.example config --quiet
