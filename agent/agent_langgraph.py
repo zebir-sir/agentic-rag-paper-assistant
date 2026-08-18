@@ -32,6 +32,10 @@ from .retrieval_harness_policy import (
     evaluate_retrieval_contract,
 )
 from .retrieval_harness_schema import RetrievalContract
+from .retrieval_failure_policy import (
+    apply_external_retrieval_failure_policy,
+    build_external_retrieval_disclosure,
+)
 from .prompts import SYSTEM_PROMPT
 from .tools import DocumentListInput, is_general_web_search_enabled, list_documents_tool
 from .openalex_router import _is_openalex_enabled
@@ -201,6 +205,7 @@ def _build_runtime_decision_summary(metadata: Dict[str, Any]) -> str:
     lines.append(f"- retrieval_attempt_count: {metadata.get('retrieval_attempt_count')}")
     lines.append(f"- tools_planned: {metadata.get('tools_planned')}")
     lines.append(f"- tools_executed: {metadata.get('tools_executed')}")
+    lines.append(f"- external_retrieval_statuses: {metadata.get('external_retrieval_statuses')}")
     contract = metadata.get("retrieval_contract") or {}
     if isinstance(contract, dict) and contract:
         lines.append(f"- retrieval_contract.required_sources: {contract.get('required_source_types')}")
@@ -1309,6 +1314,11 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
         tools_planned = list(exec_out.get("planned_steps") or [step.model_dump() for step in plan.retrieval_steps])
         tools_executed_raw = list(exec_out.get("tools_executed") or [])
         filtered_unavailable_tools = list(exec_out.get("filtered_unavailable_tools") or [])
+        external_statuses = [
+            dict(item)
+            for item in exec_out.get("external_retrieval_statuses") or []
+            if isinstance(item, dict)
+        ]
         for warning_text in list(exec_out.get("warnings") or []):
             _append_warning(next_state, str(warning_text))
 
@@ -1330,6 +1340,29 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
         metadata["tools_executed"] = list(dict.fromkeys(previous_tools + tools_executed))
         metadata["retrieval_execution_records"] = previous_records + execution_records
         metadata["filtered_unavailable_tools"] = filtered_unavailable_tools
+        previous_external_statuses = [
+            dict(item)
+            for item in metadata.get("external_retrieval_statuses") or []
+            if isinstance(item, dict)
+        ]
+        status_keys = {
+            (str(item.get("source_type") or ""), str(item.get("provider") or ""), str(item.get("state") or ""))
+            for item in previous_external_statuses
+        }
+        for item in external_statuses:
+            key = (str(item.get("source_type") or ""), str(item.get("provider") or ""), str(item.get("state") or ""))
+            if key not in status_keys:
+                previous_external_statuses.append(item)
+                status_keys.add(key)
+        metadata["external_retrieval_statuses"] = previous_external_statuses
+        updated_answer_policy = apply_external_retrieval_failure_policy(
+            dict(metadata.get("answer_policy") or {}),
+            previous_external_statuses,
+        )
+        metadata["answer_policy"] = updated_answer_policy
+        metadata["external_retrieval_fallback_active"] = bool(
+            updated_answer_policy.get("external_fallback_mode")
+        )
         metadata["retrieval_skipped_by_planner"] = False
         metadata["retrieval_skip_reason"] = ""
         metadata["retrieval_summary_for_planner"] = summarize_hits_for_planner(round_results)
@@ -1352,6 +1385,8 @@ async def local_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
             "result_count": len(prioritized_round_results),
             "top_score": top_score,
         }
+        if external_statuses:
+            attempt["external_retrieval_statuses"] = external_statuses
         if target_ids:
             attempt["target_document_ids"] = target_ids
             attempt["supplemental_used"] = used_supplemental
@@ -1574,6 +1609,20 @@ async def grade_retrieval_node(state: LangGraphAnalysisState) -> LangGraphAnalys
             reason = contract_evaluation.reason
     except Exception as exc:
         _append_warning(next_state, f"retrieval contract evaluation failed: {exc}")
+
+    external_failure_statuses = [
+        item
+        for item in metadata.get("external_retrieval_statuses") or []
+        if isinstance(item, dict) and str(item.get("state") or "") in {"not_configured", "provider_error", "circuit_open"}
+    ]
+    if external_failure_statuses:
+        unavailable_sources = list(
+            dict.fromkeys(str(item.get("source_type") or "external") for item in external_failure_statuses)
+        )
+        sufficient = False
+        reason = f"external_retrieval_unavailable:{','.join(unavailable_sources)}"
+        next_state["skip_rewrite"] = True
+        retrieval_retry_trigger = "external_retrieval_unavailable"
 
     next_state["retrieval_sufficient"] = sufficient
     next_state["retrieval_insufficient_reason"] = None if sufficient else reason
@@ -1968,6 +2017,8 @@ def _humanize_warning(warning: str) -> Optional[str]:
 def _requires_retrieved_evidence(metadata: Dict[str, Any]) -> bool:
     """Whether this turn must not fall back to model knowledge when retrieval is empty."""
     answer_policy = dict(metadata.get("answer_policy") or {})
+    if str(answer_policy.get("external_fallback_mode") or "") == "model_knowledge_with_disclosure":
+        return False
     planner_decision = dict(metadata.get("planner_decision") or {})
     return bool(
         planner_decision.get("needs_retrieval")
@@ -2384,6 +2435,15 @@ async def finalize_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState
         if notes:
             answer = answer + "\n\n注：" + "；".join(notes)
 
+    metadata = dict(next_state.get("metadata") or {})
+    answer_policy = dict(metadata.get("answer_policy") or {})
+    external_disclosure = build_external_retrieval_disclosure(
+        metadata.get("external_retrieval_statuses") or [],
+        answer_policy,
+    )
+    if external_disclosure and external_disclosure not in answer:
+        answer = answer.rstrip() + "\n\n" + external_disclosure
+
     next_state["final_answer"] = clean_legacy_warning_text(answer)
     scope_policy = scope_policy or "broad_kb"
     target_ids = _extract_target_ids(target_documents)
@@ -2401,7 +2461,6 @@ async def finalize_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState
     if top_score is None:
         top_score = _extract_top_score(retrieval_results)
 
-    metadata = dict(next_state.get("metadata") or {})
     metadata["agent_backend"] = "langgraph"
     metadata["workflow"] = "deep_analysis"
     metadata["tool_count"] = len(list(next_state.get("tools_used") or []))
@@ -2425,6 +2484,7 @@ async def finalize_node(state: LangGraphAnalysisState) -> LangGraphAnalysisState
     metadata["target_document_hit_count"] = target_document_hit_count
     metadata["target_document_enough"] = target_document_enough
     metadata["source_count"] = len(next_state["sources"])
+    metadata["external_retrieval_fallback_disclosure"] = external_disclosure
     next_state["metadata"] = metadata
     return next_state
 

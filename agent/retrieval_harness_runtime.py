@@ -18,6 +18,21 @@ def build_retrieval_harness_trace_payload(metadata: Dict[str, Any]) -> Dict[str,
             if tool and tool not in tools:
                 tools.append(tool)
 
+    external_statuses = []
+    for item in list(metadata.get("external_retrieval_statuses") or []):
+        if not isinstance(item, dict):
+            continue
+        source_type = str(item.get("source_type") or "").strip()
+        state = str(item.get("state") or "").strip()
+        if source_type and state:
+            external_statuses.append(
+                {
+                    "source_type": source_type,
+                    "state": state,
+                    "retry_after_seconds": item.get("retry_after_seconds"),
+                }
+            )
+
     return {
         "available": True,
         "scope_policy": str(contract.get("scope_policy") or metadata.get("scope_policy") or "broad_kb"),
@@ -31,5 +46,7 @@ def build_retrieval_harness_trace_payload(metadata: Dict[str, Any]) -> Dict[str,
         "required_sources_satisfied": evaluation.get("required_sources_satisfied"),
         "missing_required_source_types": list(evaluation.get("missing_required_source_types") or []),
         "evidence_source_types": list(evaluation.get("evidence_source_types") or []),
+        "external_retrieval_statuses": external_statuses,
+        "external_fallback_active": bool(metadata.get("external_retrieval_fallback_active")),
         "reason": str(evaluation.get("reason") or metadata.get("retrieval_insufficient_reason") or ""),
     }

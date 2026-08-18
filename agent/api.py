@@ -124,6 +124,10 @@ from .memory_runtime import build_session_memory_snapshot
 from .dialog_policy import classify_dialog_turn
 from .history_resolver import resolve_history_query
 from .answer_review_runtime import review_generated_answer
+from .retrieval_failure_policy import (
+    apply_external_retrieval_failure_policy,
+    build_external_retrieval_disclosure,
+)
 from .simple_chat_runtime import (
     SimpleChatDecision,
     choose_simple_chat_strategy,
@@ -320,6 +324,36 @@ def _should_retry_stream_answer(
         return True, "degenerate_answer"
 
     return False, "no_retry"
+
+
+def _apply_external_retrieval_disclosure(
+    response: str,
+    deps: AgentDependencies,
+    workflow_metadata: Dict[str, Any],
+    *,
+    allow_model_knowledge: bool = True,
+) -> tuple[str, List[Dict[str, Any]], Dict[str, Any], str]:
+    """Expose external-search degradation without presenting it as retrieved evidence."""
+    metadata = dict(workflow_metadata or {})
+    statuses = [
+        dict(item)
+        for item in (metadata.get("external_retrieval_statuses") or (deps.search_preferences or {}).get("external_retrieval_statuses") or [])
+        if isinstance(item, dict)
+    ]
+    input_policy = dict(metadata.get("answer_policy") or {})
+    if not allow_model_knowledge:
+        input_policy["blocked_source_types"] = list(
+            dict.fromkeys([*input_policy.get("blocked_source_types", []), "model_knowledge"])
+        )
+    policy = apply_external_retrieval_failure_policy(
+        input_policy,
+        statuses,
+    )
+    disclosure = build_external_retrieval_disclosure(statuses, policy)
+    text = str(response or "").strip()
+    if disclosure and disclosure not in text:
+        text = f"{text}\n\n{disclosure}".strip()
+    return text, statuses, policy, disclosure
 
 
 def clean_markdown_spacing(text: str) -> str:
@@ -800,6 +834,12 @@ async def execute_prepared_chat_runtime(
             clean_markdown_spacing(response),
             drop_warning=bool(workflow_metadata.get("retrieval_skipped_by_planner") and workflow_metadata.get("direct_answer_allowed")),
         )
+        response, external_retrieval_statuses, external_fallback_policy, external_disclosure = _apply_external_retrieval_disclosure(
+            response,
+            deps,
+            workflow_metadata,
+            allow_model_knowledge=not (runtime.is_local_question and not sources),
+        )
         review_result = review_generated_answer(
             answer=response,
             sources=sources,
@@ -826,6 +866,12 @@ async def execute_prepared_chat_runtime(
         retrieval_error = (deps.search_preferences or {}).get("retrieval_error")
         if retrieval_error:
             safe_workflow_metadata["retrieval_error"] = retrieval_error
+        if external_retrieval_statuses:
+            safe_workflow_metadata["external_retrieval_statuses"] = external_retrieval_statuses
+            safe_workflow_metadata["external_retrieval_fallback_active"] = bool(
+                external_fallback_policy.get("external_fallback_mode")
+            )
+            safe_workflow_metadata["external_retrieval_fallback_disclosure"] = external_disclosure
         safe_workflow_metadata["answer_review_reviewed"] = review_result.reviewed
         safe_workflow_metadata["answer_review_action"] = review_result.review_action
         safe_workflow_metadata["answer_review_risk"] = review_result.unsupported_claim_risk
@@ -1563,6 +1609,15 @@ async def chat_stream(request: ChatRequest):
                     clean_markdown_spacing(full_response),
                     drop_warning=bool(workflow_metadata.get("retrieval_skipped_by_planner") and workflow_metadata.get("direct_answer_allowed")),
                 )
+                response_before_disclosure = full_response
+                full_response, external_retrieval_statuses, external_fallback_policy, external_disclosure = _apply_external_retrieval_disclosure(
+                    full_response,
+                    deps,
+                    workflow_metadata,
+                    allow_model_knowledge=not (is_local_question and not sources),
+                )
+                if full_response.startswith(response_before_disclosure) and len(full_response) > len(response_before_disclosure):
+                    yield sse_event("text", content=full_response[len(response_before_disclosure):])
                 review_result = review_generated_answer(
                     answer=full_response,
                     sources=sources,
@@ -1594,6 +1649,12 @@ async def chat_stream(request: ChatRequest):
                 retrieval_error = (deps.search_preferences or {}).get("retrieval_error")
                 if retrieval_error:
                     safe_workflow_metadata["retrieval_error"] = retrieval_error
+                if external_retrieval_statuses:
+                    safe_workflow_metadata["external_retrieval_statuses"] = external_retrieval_statuses
+                    safe_workflow_metadata["external_retrieval_fallback_active"] = bool(
+                        external_fallback_policy.get("external_fallback_mode")
+                    )
+                    safe_workflow_metadata["external_retrieval_fallback_disclosure"] = external_disclosure
                 safe_workflow_metadata["answer_review_reviewed"] = review_result.reviewed
                 safe_workflow_metadata["answer_review_action"] = review_result.review_action
                 safe_workflow_metadata["answer_review_risk"] = review_result.unsupported_claim_risk

@@ -7,6 +7,11 @@ from .app_config import get_rabbitmq_url
 from .cache_utils import get_redis_runtime_status
 from .openalex_router import _is_openalex_enabled
 from .tools import get_general_web_search_provider, is_general_web_search_enabled
+from .external_retrieval_resilience import (
+    external_retrieval_circuit_cooldown_seconds,
+    external_retrieval_circuit_threshold,
+    external_retrieval_retry_count,
+)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -46,6 +51,9 @@ def build_runtime_diagnostics() -> Dict[str, Any]:
     web_enabled = is_general_web_search_enabled()
     web_provider = get_general_web_search_provider()
     openalex_enabled = _is_openalex_enabled()
+    external_retry_count = external_retrieval_retry_count()
+    external_circuit_threshold = external_retrieval_circuit_threshold()
+    external_circuit_cooldown = external_retrieval_circuit_cooldown_seconds()
 
     features: Dict[str, Dict[str, Any]] = {
         "llm": _build_feature(
@@ -81,6 +89,15 @@ def build_runtime_diagnostics() -> Dict[str, Any]:
             enabled=web_enabled,
             configured=web_enabled,
             detail=f"General web search provider: {web_provider}",
+        ),
+        "external_retrieval_resilience": _build_feature(
+            enabled=True,
+            configured=True,
+            detail=(
+                "External retrieval retry/circuit policy "
+                f"(retries={external_retry_count}, threshold={external_circuit_threshold}, "
+                f"cooldown_seconds={external_circuit_cooldown:g})"
+            ),
         ),
         "security_headers": _build_feature(
             enabled=security_headers_enabled,

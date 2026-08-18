@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from agent.intent_planner import IntentPlan, PlannerCapabilities, RetrievalStep
@@ -63,6 +65,39 @@ async def test_execute_intent_plan_steps_handles_tool_failure_with_warning():
     assert out["results"] == []
     assert out["tools_executed"] == []
     assert any("planned tool failed: hybrid_search" in w for w in out["warnings"])
+
+
+def test_execute_intent_plan_steps_keeps_external_provider_failure_out_of_evidence():
+    plan = IntentPlan(
+        intent="web_information",
+        needs_retrieval=True,
+        retrieval_steps=[RetrievalStep(tool="web_search", query="latest", limit=5)],
+        max_tools=1,
+    )
+    tools = [
+        _FakeTool(
+            "search_web",
+            [{"_external_retrieval_status": {
+                "source_type": "general_web",
+                "provider": "test-web",
+                "state": "provider_error",
+                "retry_count": 1,
+            }}],
+        )
+    ]
+
+    out = asyncio.run(
+        execute_intent_plan_steps(
+            plan,
+            tools,
+            fallback_query="latest",
+            capabilities=PlannerCapabilities(web_search_enabled=True),
+        )
+    )
+
+    assert out["results"] == []
+    assert out["tools_executed"][0]["status"] == "provider_error"
+    assert out["external_retrieval_statuses"][0]["source_type"] == "general_web"
 
 
 @pytest.mark.asyncio

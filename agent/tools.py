@@ -26,6 +26,10 @@ from .providers import build_embedding_request_kwargs, get_embedding_client, get
 from .embedding_runtime import EmbeddingLanguage, get_embedding_client_for_route, get_embedding_route
 from .cache_utils import cache_get_json, cache_set_json, make_cache_key
 from .query_translation_runtime import translate_query_to_english
+from .external_retrieval_resilience import (
+    not_configured_external_retrieval,
+    run_external_retrieval,
+)
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -502,9 +506,9 @@ def _sync_general_web_search(query: str, limit: int) -> List[Dict[str, Any]]:
             if result is not None:
                 normalized.append(result)
         return normalized
-    except Exception as exc:
-        logger.warning("General web search failed: %s", exc)
-        return []
+    except Exception:
+        # The async wrapper owns retry/circuit state and must see the failure.
+        raise
 
 
 def _sync_fetch_openalex_works(query: str, limit: int) -> List[Dict[str, Any]]:
@@ -541,73 +545,80 @@ async def openalex_search_tool(input_data: OpenAlexSearchInput) -> List[Dict[str
 
     Guidance:
     - 当用户已开启联网搜索且问题涉及上述需求时，应优先考虑使用该工具。
-    - 若未配置 OPENALEX_API_KEY，本工具会安全返回空结果，不影响本地知识库问答。
+    - 不可用状态会作为结构化工具结果返回，供上层进行来源边界降级。
     """
     api_key = os.getenv("OPENALEX_API_KEY", "").strip()
     if not api_key:
-        return []
-
-    try:
-        works = await asyncio.to_thread(
-            _sync_fetch_openalex_works,
-            input_data.query,
-            input_data.limit,
+        unavailable = not_configured_external_retrieval(
+            source_type="external_academic",
+            provider="openalex",
         )
-        results: List[Dict[str, Any]] = []
-        for work in works:
-            openalex_id = str(work.get("id") or "")
-            title = str(work.get("display_name") or "").strip()
-            if not title:
-                continue
+        return [unavailable.status.as_tool_payload()]
 
-            doi = work.get("doi")
-            landing_page_url = (
-                (work.get("primary_location") or {}).get("landing_page_url")
-                or (work.get("ids") or {}).get("openalex")
-                or openalex_id
-            )
-            pdf_url = _extract_pdf_url(work)
-            abstract = _decode_openalex_abstract(work.get("abstract_inverted_index"))
-            open_access = work.get("open_access") or {}
-            authors = _extract_authors(work)
-            year = work.get("publication_year")
-            venue = _extract_venue(work)
+    outcome = await run_external_retrieval(
+        source_type="external_academic",
+        provider="openalex",
+        operation=lambda: asyncio.to_thread(_sync_fetch_openalex_works, input_data.query, input_data.limit),
+    )
+    if outcome.status.state in {"not_configured", "provider_error", "circuit_open"}:
+        return [outcome.status.as_tool_payload()]
 
-            result = {
-                "title": title,
-                "authors": authors,
-                "year": year,
-                "source": venue,
-                "cited_by_count": work.get("cited_by_count"),
-                "doi": doi,
-                "landing_page_url": landing_page_url,
-                "pdf_url": pdf_url,
-                "abstract": abstract,
-                "openalex_id": openalex_id,
-                "source_kind": "openalex",
-                "is_oa": bool(open_access.get("is_oa")),
-                "has_pdf": bool(pdf_url),
-                "has_fulltext": bool(pdf_url or abstract),
-            }
-            results.append(result)
-        return results
-    except Exception as e:
-        logger.warning(f"OpenAlex search failed: {e}")
-        return []
+    results: List[Dict[str, Any]] = []
+    for work in outcome.items:
+        openalex_id = str(work.get("id") or "")
+        title = str(work.get("display_name") or "").strip()
+        if not title:
+            continue
+
+        doi = work.get("doi")
+        landing_page_url = (
+            (work.get("primary_location") or {}).get("landing_page_url")
+            or (work.get("ids") or {}).get("openalex")
+            or openalex_id
+        )
+        pdf_url = _extract_pdf_url(work)
+        abstract = _decode_openalex_abstract(work.get("abstract_inverted_index"))
+        open_access = work.get("open_access") or {}
+        authors = _extract_authors(work)
+        year = work.get("publication_year")
+        venue = _extract_venue(work)
+
+        result = {
+            "title": title,
+            "authors": authors,
+            "year": year,
+            "source": venue,
+            "cited_by_count": work.get("cited_by_count"),
+            "doi": doi,
+            "landing_page_url": landing_page_url,
+            "pdf_url": pdf_url,
+            "abstract": abstract,
+            "openalex_id": openalex_id,
+            "source_kind": "openalex",
+            "is_oa": bool(open_access.get("is_oa")),
+            "has_pdf": bool(pdf_url),
+            "has_fulltext": bool(pdf_url or abstract),
+        }
+        results.append(result)
+    return results
 
 
 async def web_search_tool(input_data: WebSearchInput) -> List[Dict[str, Any]]:
     if not is_general_web_search_enabled():
-        return []
-    try:
-        return await asyncio.to_thread(
-            _sync_general_web_search,
-            input_data.query,
-            input_data.limit,
+        unavailable = not_configured_external_retrieval(
+            source_type="general_web",
+            provider=get_general_web_search_provider(),
         )
-    except Exception as e:
-        logger.warning(f"General web search failed: {e}")
-        return []
+        return [unavailable.status.as_tool_payload()]
+    provider = get_general_web_search_provider()
+    outcome = await run_external_retrieval(
+        source_type="general_web",
+        provider=f"general_web:{provider}",
+        operation=lambda: asyncio.to_thread(_sync_general_web_search, input_data.query, input_data.limit),
+    )
+    if outcome.status.state in {"not_configured", "provider_error", "circuit_open"}:
+        return [outcome.status.as_tool_payload()]
+    return outcome.items
 
 
 async def vector_search_tool(input_data: VectorSearchInput) -> List[ChunkResult]:

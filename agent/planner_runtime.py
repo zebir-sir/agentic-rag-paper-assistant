@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional, Tuple
 
 from .intent_planner import IntentPlan, PlannerCapabilities, RetrievalStep
+from .external_retrieval_resilience import parse_external_retrieval_status
 from .tool_specs import get_tool_source_type
 
 
@@ -115,6 +116,7 @@ async def execute_intent_plan_steps(
     results: List[Dict[str, Any]] = []
     tools_executed: List[Dict[str, Any]] = []
     filtered_unavailable_tools: List[str] = []
+    external_retrieval_statuses: List[Dict[str, Any]] = []
     seen = set()
     allowed_internal = {
         "hybrid_search": caps.hybrid_search_enabled,
@@ -138,6 +140,17 @@ async def execute_intent_plan_steps(
         if not allowed_internal.get(tool_name, False):
             warnings.append(f"tool_unavailable:{tool_name}")
             filtered_unavailable_tools.append(tool_name)
+            source_type = get_tool_source_type(str(step.tool)) or "unknown"
+            if source_type in {"general_web", "external_academic"}:
+                external_retrieval_statuses.append(
+                    {
+                        "source_type": source_type,
+                        "provider": tool_name,
+                        "state": "not_configured",
+                        "retry_count": 0,
+                        "detail": "tool disabled by current capability policy",
+                    }
+                )
             continue
         if enforce_target_scope and normalized_target_ids and tool_name in {
             "hybrid_search", "vector_search", "section_search", "artifact_search",
@@ -153,10 +166,30 @@ async def execute_intent_plan_steps(
         tool = tool_map.get(tool_name)
         if tool is None:
             warnings.append(f"planned tool unavailable: {tool_name}")
+            source_type = get_tool_source_type(str(step.tool)) or "unknown"
+            if source_type in {"general_web", "external_academic"}:
+                external_retrieval_statuses.append(
+                    {
+                        "source_type": source_type,
+                        "provider": tool_name,
+                        "state": "not_configured",
+                        "retry_count": 0,
+                        "detail": "tool missing from runtime registry",
+                    }
+                )
             continue
         try:
-            out = list(await tool.ainvoke(args) or [])
             source_type = get_tool_source_type(str(step.tool)) or "unknown"
+            raw_out = list(await tool.ainvoke(args) or [])
+            status_payloads = []
+            out = []
+            for item in raw_out:
+                status = parse_external_retrieval_status(item)
+                if status is not None:
+                    status_payloads.append(status.model_dump())
+                else:
+                    out.append(item)
+            external_retrieval_statuses.extend(status_payloads)
             if tool_name in {"search_openalex_papers", "search_web"}:
                 out = [_normalize_external_result(x, source_type) for x in out if isinstance(x, dict)]
             else:
@@ -167,11 +200,29 @@ async def execute_intent_plan_steps(
                         normalized_out.append(normalized_item)
                 out = normalized_out
             results.extend(out)
-            tools_executed.append(
-                {"tool": tool_name, "args": args, "source_type": source_type, "result_count": len(out)}
-            )
+            record = {"tool": tool_name, "args": args, "source_type": source_type, "result_count": len(out)}
+            if status_payloads:
+                record["status"] = status_payloads[-1].get("state")
+                record["retry_count"] = status_payloads[-1].get("retry_count", 0)
+                record["provider"] = status_payloads[-1].get("provider", "")
+                for status in status_payloads:
+                    warnings.append(
+                        f"external_retrieval_{status.get('state')}:{status.get('source_type')}"
+                    )
+            tools_executed.append(record)
         except Exception as exc:
             warnings.append(f"planned tool failed: {tool_name}: {exc}")
+            source_type = get_tool_source_type(str(step.tool)) or "unknown"
+            if source_type in {"general_web", "external_academic"}:
+                external_retrieval_statuses.append(
+                    {
+                        "source_type": source_type,
+                        "provider": tool_name,
+                        "state": "provider_error",
+                        "retry_count": 0,
+                        "detail": type(exc).__name__,
+                    }
+                )
             continue
 
     return {
@@ -179,5 +230,6 @@ async def execute_intent_plan_steps(
         "tools_executed": tools_executed,
         "planned_steps": planned_raw,
         "filtered_unavailable_tools": filtered_unavailable_tools,
+        "external_retrieval_statuses": external_retrieval_statuses,
         "warnings": warnings,
     }

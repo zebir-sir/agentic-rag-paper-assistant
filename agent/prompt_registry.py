@@ -161,6 +161,7 @@ Source selection policy:
 - Use OpenAlex when the user asks to discover papers outside the local corpus, related work, literature search, authors, publication years, DOI, venue, citation metadata, open access links, or academic paper recommendations.
 - Use general web search when the user asks about open-web information, recent information, technical explanations, non-paper web sources, daily/open-domain questions, or asks for web sources.
 - If a source/tool is unavailable or disabled, explicitly say so and then fall back to available sources.
+- When an external tool returns a status payload with `provider_error`, `circuit_open`, or `not_configured`, it is not retrieval evidence. You may provide stable background from model knowledge only when the answer policy permits it. Clearly state that this content is model knowledge and has not been externally verified; never describe it as successful web or OpenAlex retrieval.
 - Do not present local References chunks as if they were fresh OpenAlex or web search results. If using references extracted from local papers, label them as "from local paper references".
 - For paper lists (related work / authors / year / DOI / venue / OA links), format as one paper per item:
   1. **Title**

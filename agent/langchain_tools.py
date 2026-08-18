@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from .agent_runtime import AgentDependencies, _resolve_default_search_type
 from .tool_payloads import (
     collect_hits,
+    record_external_retrieval_status,
     run_get_document_payload,
     run_hybrid_search_payload,
     run_artifact_search_payload,
@@ -14,6 +15,7 @@ from .tool_payloads import (
     run_section_search_payload,
     run_vector_search_payload,
 )
+from .external_retrieval_resilience import parse_external_retrieval_status
 from .tools import (
     web_search_tool,
     WebSearchInput,
@@ -168,6 +170,10 @@ def build_langchain_tools(deps: AgentDependencies) -> list:
         results = await web_search_tool(WebSearchInput(query=query, limit=limit))
         payload: List[Dict[str, Any]] = []
         for item in results:
+            if parse_external_retrieval_status(item) is not None:
+                record_external_retrieval_status(deps, item)
+                payload.append(item)
+                continue
             title = item.get("title") or "Web Result"
             url = str(item.get("url") or "").strip()
             snippet = item.get("snippet") or ""

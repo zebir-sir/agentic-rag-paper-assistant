@@ -44,6 +44,7 @@ Thumbs.db
 # local virtualenv / temp
 .venv/
 .tmp/
+output/
 web/dist/
 
 test_logs/
@@ -56,6 +57,8 @@ documents/
 # Personal interview study material; not part of the project deliverables.
 docs/generate_interview_handbook_template.py
 docs/generate_interview_study_doc.py
+docs/paperweave_interview_*.md
+docs/generate_paperweave_project_encyclopedia.py
 
 # Eval raw outputs
 evals/results/**

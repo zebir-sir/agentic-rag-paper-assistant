@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional
 
 from .agent_runtime import AgentDependencies, _collect_evidence_hit
+from .external_retrieval_resilience import parse_external_retrieval_status
 from .tools import (
     ArtifactSearchInput,
     DocumentInput,
@@ -21,6 +22,24 @@ from .tools import (
 def _mark_retrieval_error(deps: AgentDependencies, message: str) -> None:
     prefs = dict(deps.search_preferences or {})
     prefs["retrieval_error"] = message
+    deps.search_preferences = prefs
+
+
+def record_external_retrieval_status(deps: AgentDependencies, payload: Any) -> None:
+    """Keep external provider outcomes visible without turning them into evidence."""
+    status = parse_external_retrieval_status(payload)
+    if status is None:
+        return
+    prefs = dict(deps.search_preferences or {})
+    statuses = [item for item in prefs.get("external_retrieval_statuses") or [] if isinstance(item, dict)]
+    item = status.model_dump()
+    key = (item["source_type"], item["provider"], item["state"])
+    if not any(
+        (str(existing.get("source_type") or ""), str(existing.get("provider") or ""), str(existing.get("state") or "")) == key
+        for existing in statuses
+    ):
+        statuses.append(item)
+    prefs["external_retrieval_statuses"] = statuses
     deps.search_preferences = prefs
 
 
@@ -156,6 +175,10 @@ async def run_openalex_payload(deps: AgentDependencies, query: str, limit: int) 
     results = await openalex_search_tool(OpenAlexSearchInput(query=query, limit=limit))
     payload: List[Dict[str, Any]] = []
     for item in results:
+        if parse_external_retrieval_status(item) is not None:
+            record_external_retrieval_status(deps, item)
+            payload.append(item)
+            continue
         abstract = str(item.get("abstract") or "").strip()
         snippet = abstract or f"{item.get('title', '')} ({item.get('year') or 'N/A'})"
         metadata = {
