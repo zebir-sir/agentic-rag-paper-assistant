@@ -14,7 +14,6 @@ RECENT_MESSAGE_COUNT = int(os.getenv("MEMORY_RECENT_TURNS", "8"))
 MEMORY_UPDATE_TURN_INTERVAL = int(os.getenv("MEMORY_UPDATE_TURN_INTERVAL", "8"))
 MEMORY_SUMMARY_KEYS = (
     "goal",
-    "scope_document_ids",
     "constraints",
     "confirmed_decisions",
     "open_questions",
@@ -44,7 +43,6 @@ def estimate_tokens(text: str) -> int:
 def empty_memory_summary() -> Dict[str, Any]:
     return {
         "goal": "",
-        "scope_document_ids": [],
         "constraints": [],
         "confirmed_decisions": [],
         "open_questions": [],
@@ -56,7 +54,6 @@ def normalize_memory_summary(value: Any) -> Dict[str, Any]:
     source = value if isinstance(value, dict) else {}
     result = empty_memory_summary()
     result["goal"] = str(source.get("goal") or "").strip()[:600]
-    result["scope_document_ids"] = [str(item) for item in source.get("scope_document_ids", []) if str(item).strip()][:30]
     for key in ("constraints", "confirmed_decisions", "open_questions", "uncertainties"):
         raw_items = source.get(key, [])
         if not isinstance(raw_items, list):
@@ -90,16 +87,6 @@ def memory_eligible_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, A
             "role": str(message["role"]),
             "content": str(message["content"]).strip(),
         }
-        metadata = message.get("metadata") or {}
-        if item["role"] == "user":
-            scope_ids = metadata.get("scope_document_ids") or metadata.get("selected_document_ids") or []
-            if isinstance(scope_ids, list):
-                normalized_scope_ids = [str(value) for value in scope_ids if str(value).strip()][:30]
-                if normalized_scope_ids:
-                    item["scope_document_ids"] = normalized_scope_ids
-            scope_mode = str(metadata.get("scope_mode") or "").strip()
-            if scope_mode:
-                item["scope_mode"] = scope_mode
         eligible.append(item)
     return eligible
 
@@ -107,10 +94,7 @@ def memory_eligible_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, A
 def _messages_to_text(messages: List[Dict[str, Any]]) -> str:
     lines: List[str] = []
     for item in messages:
-        scope = ""
-        if item.get("role") == "user" and item.get("scope_mode"):
-            scope = f" [scope_mode={item['scope_mode']}; scope_document_ids={item.get('scope_document_ids', [])}]"
-        lines.append(f"{item['role']}{scope}: {item['content']}")
+        lines.append(f"{item['role']}: {item['content']}")
     return "\n".join(lines)
 
 
@@ -120,9 +104,9 @@ def build_memory_update_prompt(
 ) -> str:
     return (
         "Update a structured research conversation memory. Return JSON only. "
-        "Schema: {goal:string, scope_document_ids:string[], constraints:string[], "
+        "Schema: {goal:string, constraints:string[], "
         "confirmed_decisions:string[], open_questions:string[], uncertainties:string[]}. "
-        "Only keep durable conversation coordination: user goal, selected document IDs, "
+        "Only keep durable conversation coordination: user goal, "
         "explicit constraints, user-confirmed decisions, follow-up questions, and uncertainty boundaries. "
         "Never store paper claims, numerical results, citations, source snippets, retrieval results, "
         "tool calls, model reasoning, debug data, errors, or assistant guesses as memory. "

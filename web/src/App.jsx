@@ -210,7 +210,6 @@ function Workspace({ state, setState, initialPrompt, clearInitialPrompt, onSessi
       await streamChat(state.config.apiUrl, {
         message,
         session_id: state.activeSessionId,
-        selected_document_ids: state.scopeMode === "selected_documents" ? state.selectedDocumentIds : [],
         use_react: state.config.useReact,
         use_web_search: state.config.allowWeb,
         metadata: {
@@ -309,7 +308,7 @@ function Settings({ state, setState, refresh }) {
 
 export default function App() {
   const [page, setPage] = useState("workspace"); const [pendingPrompt, setPendingPrompt] = useState(""); const [readerDocument, setReaderDocument] = useState(null); const [paperGraph, setPaperGraph] = useState({ nodes: [], edges: [], version: 0 });
-  const [state, setState] = useState(() => { const stored = localStorage.getItem("agentic-rag-api-url"); return { config: { apiUrl: stored === "http://localhost:8000" ? "http://localhost:8059" : stored || "http://localhost:8059", useReact: true, allowOpenAlex: false, allowWeb: false }, online: false, documents: [], sessions: [], messages: [], activeSessionId: null, selectedDocumentIds: [], scopeMode: "knowledge_base", isStreaming: false, streamingMessageId: null }; });
+  const [state, setState] = useState(() => { const stored = localStorage.getItem("agentic-rag-api-url"); return { config: { apiUrl: stored === "http://localhost:8000" ? "http://localhost:8059" : stored || "http://localhost:8059", useReact: true, allowOpenAlex: false, allowWeb: false }, online: false, documents: [], sessions: [], messages: [], activeSessionId: null, isStreaming: false, streamingMessageId: null }; });
   const refreshPaperGraph = useCallback(async (url = state.config.apiUrl) => { const graph = await api.paperGraph(url); setPaperGraph((current) => current.version === graph.version ? current : graph); }, [state.config.apiUrl]);
   const refreshSessions = useCallback(async (url = state.config.apiUrl) => {
     const result = await api.sessions(url);

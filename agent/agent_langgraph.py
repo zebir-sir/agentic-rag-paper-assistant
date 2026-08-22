@@ -475,36 +475,8 @@ async def resolve_answer_scope_node(state: LangGraphAnalysisState) -> LangGraphA
     question = str(next_state.get("question") or "").strip()
     documents = list(next_state.get("documents") or [])
     fallback = parse_answer_scope("", documents)
-    deps = next_state.get("deps")
-    search_preferences = dict(getattr(deps, "search_preferences", {}) or {})
-    selected_document_ids = {
-        str(document_id).strip()
-        for document_id in (search_preferences.get("selected_document_ids") or [])
-        if str(document_id).strip()
-    }
-    selected_targets = [
-        {
-            "document_id": str(document.get("id") or "").strip(),
-            "title": str(document.get("title") or "").strip(),
-            "confidence": 1.0,
-            "match_reason": "selected in research scope",
-            "document_language": str((document.get("metadata") or {}).get("document_language") or "").strip().lower(),
-        }
-        for document in documents
-        if str(document.get("id") or "").strip() in selected_document_ids
-    ]
     explicit_targets = _extract_explicit_target_documents(question, documents)
-    if selected_targets:
-        allow_supplemental = bool(search_preferences.get("allow_supplemental", True))
-        parsed = {
-            "scope_policy": "prefer_target" if allow_supplemental else "strict_target",
-            "target_documents": selected_targets,
-            "allow_supplemental": allow_supplemental,
-            "scope_resolver_used": True,
-            "scope_reason": "User selected research-scope documents.",
-            "answer_instruction": "Prioritize the documents selected in the research scope.",
-        }
-    elif explicit_targets:
+    if explicit_targets:
         parsed = {
             "scope_policy": "strict_target",
             "target_documents": explicit_targets,

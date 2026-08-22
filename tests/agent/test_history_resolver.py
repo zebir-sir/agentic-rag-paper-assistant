@@ -28,8 +28,6 @@ def test_resolve_history_query_keeps_self_contained_question_unchanged():
     assert result.used_history is False
     assert result.resolved_query == "请解释 RRT* 和 Informed RRT* 的区别。"
     assert result.reason == "query_is_self_contained"
-
-
 def test_resolve_history_query_falls_back_when_no_topic_found():
     result = resolve_history_query(
         latest_query="这个结果为什么更好？",

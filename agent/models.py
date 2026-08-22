@@ -122,7 +122,6 @@ class SessionMemoryPreviewItem(BaseModel):
 
 class SessionMemorySummary(BaseModel):
     goal: str = ""
-    scope_document_ids: List[str] = Field(default_factory=list)
     constraints: List[str] = Field(default_factory=list)
     confirmed_decisions: List[str] = Field(default_factory=list)
     open_questions: List[str] = Field(default_factory=list)

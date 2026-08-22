@@ -162,13 +162,8 @@ async def run_cases(cases: list[dict[str, Any]], output_dir: Path, timeout_secon
         started = time.perf_counter()
         row = {**case, "error": None}
         try:
-            selected_document_ids = [str(document["id"]) for document in case["gold_documents"]]
-            preferences = {
-                "selected_document_ids": selected_document_ids,
-                "allow_supplemental": case["category"] == "graph_relation_compare",
-            } if selected_document_ids else {}
             result = await asyncio.wait_for(
-                run_langgraph_analysis(case["question"], AgentDependencies(session_id=f"overnight-eval-{uuid.uuid4().hex[:12]}", user_id="evaluation", search_preferences=preferences), context_prompt=""),
+                run_langgraph_analysis(case["question"], AgentDependencies(session_id=f"overnight-eval-{uuid.uuid4().hex[:12]}", user_id="evaluation"), context_prompt=""),
                 timeout=timeout_seconds,
             )
             sources = [_as_dict(source) for source in result.sources]

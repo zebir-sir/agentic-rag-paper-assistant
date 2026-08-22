@@ -84,7 +84,7 @@
 
 ![多论文研究问答](docs/assets/chat-research-workspace.png)
 
-在单篇、选定多篇或整个知识库范围内提问。复杂问题可进入深度分析路径，流式生成期间只标记最新回复，并自动跟随至最新对话。
+在整个知识库范围内提问；系统会从问题与会话上下文中解析目标论文。复杂问题可进入深度分析路径，流式生成期间只标记最新回复，并自动跟随至最新对话。
 
 ### 2. 原文划词、上下文翻译与提问
 
@@ -168,8 +168,8 @@ flowchart LR
 ### 研究发现与问答链路
 
 ```text
-研究问题 + 选定论文范围
-  -> 历史、当前研究对象与意图解析
+研究问题 + 最近会话上下文
+  -> 受控会话上下文改写、当前研究对象与意图解析
   -> 来源策略（论文 / 章节 / 图表算法 / 星图 / OpenAlex / 网页 / direct）
   -> 按需以星图扩展候选论文
   -> 计划检索与质量检查
@@ -231,6 +231,16 @@ LLM_CHOICE=your-chat-model
 EMBEDDING_MODEL=your-embedding-model
 EMBEDDING_DIMENSIONS=1024
 ```
+
+可选：为上下文问题改写配置独立模型。系统每轮都会将受控的会话上下文和当前问题发送给该模型；模型只能返回原问题或必要的消歧改写。方舟可填写已开通且未退役的模型 ID，或推理接入点 ID（`ep-...`）。可通过 `GET /api/v3/models` 检查模型状态，避免使用 `Retiring` 或 `Shutdown` 模型。
+
+```env
+QUERY_REWRITE_API_KEY=your_ark_api_key
+QUERY_REWRITE_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+QUERY_REWRITE_MODEL=your-enabled-ark-model-or-endpoint
+```
+
+改写上下文默认包含完整的结构化长期记忆与最近 10 条有效会话，当前问题单独传入；系统不再设置人工 token 总预算或截断单条消息。`doubao-seed-2-0-mini-260428` 的方舟模型列表显示上下文窗口为 262144、最大输入约 229376 tokens。最近 10 条自身超过提供方硬限制时，改写会保守回退为原问题；可通过 `QUERY_REWRITE_RECENT_MESSAGE_COUNT` 调整条数。
 
 OpenAlex 与通用网页检索是独立可选能力。未配置通用网页检索时，系统仍可使用本地论文库与 OpenAlex，并会披露网页能力不可用。
 

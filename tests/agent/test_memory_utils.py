@@ -24,7 +24,7 @@ def test_memory_whitelist_excludes_partial_and_debug_messages():
     ]
 
 
-def test_memory_keeps_safe_scope_metadata_only():
+def test_memory_discards_removed_document_scope_metadata():
     messages = [
         {
             "role": "user",
@@ -42,8 +42,6 @@ def test_memory_keeps_safe_scope_metadata_only():
         {
             "role": "user",
             "content": "比较选中的材料",
-            "scope_mode": "selected_documents",
-            "scope_document_ids": ["paper-a", "paper-b"],
         }
     ]
 

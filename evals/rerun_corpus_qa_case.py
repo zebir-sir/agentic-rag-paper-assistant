@@ -28,18 +28,12 @@ async def rerun_case(output_dir: Path, case_id: str, timeout_seconds: int) -> di
     started = time.perf_counter()
     replacement = {key: value for key, value in target.items() if key not in {"answer", "sources", "tools_executed", "metadata", "score", "error", "latency_seconds"}}
     try:
-        selected_document_ids = [str(document["id"]) for document in target.get("gold_documents") or []]
-        preferences = {
-            "selected_document_ids": selected_document_ids,
-            "allow_supplemental": target.get("category") == "graph_relation_compare",
-        } if selected_document_ids else {}
         result = await asyncio.wait_for(
             run_langgraph_analysis(
                 str(target["question"]),
                 AgentDependencies(
                     session_id=f"corpus-qa-rerun-{case_id}-{uuid.uuid4().hex[:8]}",
                     user_id="evaluation",
-                    search_preferences=preferences,
                 ),
                 context_prompt="",
             ),

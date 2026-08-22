@@ -125,7 +125,7 @@ async def test_run_artifact_search_payload_error_sets_retrieval_error(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_hybrid_search_payload_keeps_graph_expanded_document_scope(monkeypatch):
+async def test_hybrid_search_payload_preserves_explicit_document_scope(monkeypatch):
     captured = {}
 
     async def fake_hybrid_search_tool(input_data):
@@ -133,11 +133,13 @@ async def test_hybrid_search_payload_keeps_graph_expanded_document_scope(monkeyp
         return []
 
     monkeypatch.setattr("agent.tool_payloads.hybrid_search_tool", fake_hybrid_search_tool)
-    deps = AgentDependencies(
-        session_id="scoped",
-        search_preferences={"selected_document_ids": ["seed-paper", "graph-neighbor"]},
-    )
+    deps = AgentDependencies(session_id="scoped")
 
-    await run_hybrid_search_payload(deps=deps, query="method transfer", limit=4)
+    await run_hybrid_search_payload(
+        deps=deps,
+        query="method transfer",
+        limit=4,
+        document_ids=["seed-paper", "graph-neighbor"],
+    )
 
     assert captured["document_ids"] == ["seed-paper", "graph-neighbor"]

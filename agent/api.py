@@ -123,6 +123,11 @@ from .memory_utils import (
 from .memory_runtime import build_session_memory_snapshot
 from .dialog_policy import classify_dialog_turn
 from .history_resolver import resolve_history_query
+from .query_rewrite_runtime import (
+    build_query_rewrite_context,
+    get_query_rewrite_model,
+    rewrite_query_with_conversation,
+)
 from .answer_review_runtime import review_generated_answer
 from .retrieval_failure_policy import (
     apply_external_retrieval_failure_policy,
@@ -612,6 +617,7 @@ class ChatRuntime:
     effective_search_type: str
     effective_use_web_search: bool
     use_react: bool
+    retrieval_query: str
     full_prompt: str
     langgraph_context_prompt: str
     compression_used: bool
@@ -636,13 +642,6 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
     request_metadata = request.metadata or {}
     allow_web_search = bool(request_metadata.get("allow_web_search", bool(request.use_web_search)))
     allow_openalex_search = bool(request_metadata.get("allow_openalex_search", True))
-    selected_document_ids = [
-        str(document_id).strip()
-        for document_id in (request_metadata.get("selected_document_ids") or [])
-        if str(document_id).strip()
-    ]
-    scope_mode = str(request_metadata.get("scope_mode") or "knowledge_base").strip()
-    allow_supplemental = bool(request_metadata.get("allow_supplemental", True))
     deps = AgentDependencies(
         session_id=request.session_id or "",
         user_id=request.user_id,
@@ -652,10 +651,7 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
             "default_limit": 10,
             "allow_web_search": allow_web_search,
             "allow_openalex_search": allow_openalex_search,
-            "scope_mode": scope_mode,
-            "selected_document_ids": selected_document_ids,
             "use_paper_graph": bool(request_metadata.get("use_paper_graph", True)),
-            "allow_supplemental": allow_supplemental,
         },
     )
     context_payload = await _prepare_agent_prompt(
@@ -668,6 +664,21 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
         latest_query=request.message,
         history_messages=history_messages,
     )
+    try:
+        rewrite_model = get_query_rewrite_model()
+    except Exception:
+        rewrite_model = None
+    memory_state = context_payload.get("memory_state")
+    rewrite_context = build_query_rewrite_context(
+        history_messages=history_messages,
+        memory_summary=dict(getattr(memory_state, "summary", {}) or {}),
+    )
+    query_rewrite = await rewrite_query_with_conversation(
+        original_query=request.message,
+        conversation_context=rewrite_context,
+        model=rewrite_model,
+    )
+    retrieval_query = query_rewrite.rewritten_query
     dialog_policy = classify_dialog_turn(
         latest_query=request.message,
         history_messages=history_messages,
@@ -675,10 +686,10 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
     is_general_question = _is_general_algorithm_question(request.message)
     may_need_general_web_search = _may_need_general_web_search(request.message)
     explicit_general_web_request = _is_explicit_general_web_request(request.message)
-    is_local_question = _is_local_kb_question(request.message)
+    is_local_question = _is_local_kb_question(retrieval_query)
     simple_chat_decision = choose_simple_chat_strategy(
         message=request.message,
-        resolved_query=history_resolution.resolved_query or request.message,
+        resolved_query=retrieval_query,
         is_local_question=is_local_question,
         use_react=bool(request.use_react),
         use_web_search=effective_use_web_search,
@@ -686,7 +697,7 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
 
     local_context = ""
     if is_local_question:
-        local_context = await _run_local_kb_preflight_if_needed(request.message, deps)
+        local_context = await _run_local_kb_preflight_if_needed(retrieval_query, deps)
     has_local_evidence = bool(local_context)
 
     format_instruction = _build_format_instruction(
@@ -704,7 +715,7 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
     full_prompt = base_context_prompt
     carryover_block = _build_conversation_carryover_block(
         original_query=history_resolution.original_query,
-        resolved_query=history_resolution.resolved_query,
+        resolved_query=retrieval_query,
         topic_hint=history_resolution.topic_hint,
         recent_history_summary=history_resolution.recent_history_summary,
         dialog_act=dialog_policy.dialog_act,
@@ -731,6 +742,7 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
         effective_search_type=str((deps.search_preferences or {}).get("default_search_type", requested_search_type)),
         effective_use_web_search=effective_use_web_search,
         use_react=bool(request.use_react),
+        retrieval_query=retrieval_query,
         full_prompt=full_prompt,
         langgraph_context_prompt=langgraph_context_prompt,
         compression_used=bool(context_payload["compression_used"]),
@@ -748,10 +760,13 @@ async def prepare_chat_runtime(request: ChatRequest) -> ChatRuntime:
             "paper_graph_used": False,
             "paper_graph_expanded_document_count": 0,
             "carry_context": dialog_policy.carry_context,
-            "resolved_query": history_resolution.resolved_query,
+            "resolved_query": retrieval_query,
             "history_resolution_used": history_resolution.used_history,
             "history_resolution_reason": history_resolution.reason,
             "history_topic_hint": history_resolution.topic_hint,
+            "query_rewrite_model_used": query_rewrite.model_used,
+            "query_rewrite_reason": query_rewrite.reason,
+            "query_rewrite_context_estimated_tokens": max(1, len(rewrite_context) // 4) if rewrite_context else 0,
             "simple_chat_candidate": simple_chat_decision.enabled,
             "simple_chat_candidate_mode": simple_chat_decision.mode,
             "simple_chat_candidate_reason": simple_chat_decision.reason,
@@ -797,7 +812,7 @@ async def execute_prepared_chat_runtime(
         else:
             if runtime.use_react:
                 graph_result = await run_langgraph_analysis(
-                    question=message,
+                    question=runtime.retrieval_query,
                     deps=deps,
                     context_prompt=runtime.langgraph_context_prompt,
                 )
@@ -886,8 +901,6 @@ async def execute_prepared_chat_runtime(
                     assistant_message=response,
                     user_metadata={
                         "user_id": deps.user_id,
-                        "scope_mode": (deps.search_preferences or {}).get("scope_mode", "knowledge_base"),
-                        "scope_document_ids": (deps.search_preferences or {}).get("selected_document_ids", []),
                         "compression_used": compression_used,
                         "requested_search_type": runtime.requested_search_type,
                         "effective_search_type": effective_search_type,
@@ -1229,8 +1242,6 @@ async def chat_stream(request: ChatRequest):
                         "run_id": run_id,
                         "memory_eligible": False,
                         "user_id": request.user_id,
-                        "scope_mode": (deps.search_preferences or {}).get("scope_mode", "knowledge_base"),
-                        "scope_document_ids": (deps.search_preferences or {}).get("selected_document_ids", []),
                         "compression_used": compression_used,
                         "requested_search_type": requested_search_type,
                         "effective_search_type": effective_search_type,
@@ -1401,7 +1412,7 @@ async def chat_stream(request: ChatRequest):
 
                     graph_task = asyncio.create_task(
                         run_langgraph_analysis(
-                            question=request.message,
+                            question=runtime.retrieval_query,
                             deps=deps,
                             context_prompt=langgraph_context_prompt,
                             progress_callback=progress_callback,

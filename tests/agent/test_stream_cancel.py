@@ -81,6 +81,7 @@ async def test_chat_stream_cancel_end_to_end_saves_partial_metadata(monkeypatch)
         effective_search_type="hybrid",
         effective_use_web_search=False,
         use_react=False,
+        retrieval_query="test stream cancel",
         full_prompt="prompt",
         langgraph_context_prompt="",
         compression_used=False,
