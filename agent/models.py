@@ -1,7 +1,8 @@
 from typing import List, Dict, Any, Optional, Literal
 from datetime import datetime
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 from enum import Enum
+from urllib.parse import urlparse
 
 
 class SearchType(str, Enum):
@@ -157,6 +158,42 @@ class IngestionTaskResponse(BaseModel):
     updated_at: datetime
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
+
+
+class OpenAlexIngestionRequest(BaseModel):
+    """A verified OpenAlex PDF selected from an external search result."""
+
+    title: str = Field(default="openalex_paper", min_length=1, max_length=500)
+    pdf_url: Optional[str] = Field(default=None, min_length=1, max_length=4096)
+    content_url: Optional[str] = Field(default=None, min_length=1, max_length=4096)
+    openalex_id: Optional[str] = Field(default=None, max_length=512)
+    fast: bool = False
+
+    @field_validator("title", "openalex_id", mode="before")
+    @classmethod
+    def normalize_text(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        return " ".join(str(value).split()).strip()
+
+    @field_validator("pdf_url", "content_url")
+    @classmethod
+    def validate_pdf_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        url = str(value or "").strip()
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("pdf_url must be an absolute http(s) URL")
+        return url
+
+    @model_validator(mode="after")
+    def normalize_legacy_content_url(self):
+        if not self.pdf_url and self.content_url:
+            self.pdf_url = self.content_url
+        if not self.pdf_url:
+            raise ValueError("pdf_url is required")
+        return self
 
 
 class IngestionConfig(BaseModel):

@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock, patch
 pytest.importorskip("fastapi")
 from fastapi import HTTPException
 
-from agent.api import get_ingestion_task_endpoint, submit_ingestion_task
+from agent.api import get_ingestion_task_endpoint, submit_ingestion_task, submit_openalex_ingestion
+from agent.models import OpenAlexIngestionRequest
 
 
 @pytest.mark.asyncio
@@ -73,3 +74,33 @@ async def test_get_ingestion_task_endpoint_exposes_queue_progress_fields():
     assert response.filename == "paper.pdf"
     assert response.queue_order == 4
     assert response.progress_percent == 65
+
+
+@pytest.mark.asyncio
+async def test_submit_openalex_ingestion_queues_explicit_pdf_url():
+    payload = OpenAlexIngestionRequest(
+        title="Open Access Planning Paper",
+        pdf_url="https://repository.example/paper.pdf",
+        openalex_id="https://openalex.org/W123",
+    )
+    task = {
+        "task_id": "openalex-task", "document_id": None, "file_path": "/tmp/paper.pdf",
+        "filename": "paper.pdf", "fast": False, "status": "queued", "queue_order": 1,
+        "progress_percent": 0, "progress_stage": "等待入库", "error_message": None,
+        "retry_count": 0, "created_at": "2026-05-16T00:00:00+00:00",
+        "updated_at": "2026-05-16T00:00:00+00:00", "started_at": None, "finished_at": None,
+    }
+    with patch("agent.api.add_openalex_file_to_kb", new_callable=AsyncMock, return_value=task) as mock_add:
+        response = await submit_openalex_ingestion(payload)
+
+    assert response.task_id == "openalex-task"
+    mock_add.assert_awaited_once_with(
+        file_url="https://repository.example/paper.pdf",
+        title="Open Access Planning Paper",
+        fast=False,
+    )
+
+
+def test_openalex_ingestion_request_rejects_non_http_pdf_url():
+    with pytest.raises(ValueError, match="pdf_url"):
+        OpenAlexIngestionRequest(title="Paper", pdf_url="file:///tmp/paper.pdf")

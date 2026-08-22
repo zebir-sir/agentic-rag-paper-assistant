@@ -54,6 +54,7 @@ export const api = {
     };
   },
   ingestionTasks: (baseUrl) => request(baseUrl, "/ingestion/tasks"),
+  ingestOpenAlexPaper: (baseUrl, paper) => request(baseUrl, "/ingestion/openalex", { method: "POST", body: JSON.stringify(paper) }),
   uploadBatch: (baseUrl, files) => request(baseUrl, "/ingestion/task-batches", { method: "POST", body: JSON.stringify({ files }) }),
   uploadFile: (baseUrl, file) => request(baseUrl, "/ingestion/task-batches", { method: "POST", body: JSON.stringify({ files: [file] }) }),
   resumeIngestionTask: (baseUrl, id) => request(baseUrl, `/ingestion/tasks/${id}/resume`, { method: "POST" }),

@@ -98,6 +98,7 @@ from .models import (
     SessionMemorySnapshot,
     ChatMessageItem,
     IngestionTaskResponse,
+    OpenAlexIngestionRequest,
 )
 from .tools import (
     vector_search_tool,
@@ -2191,13 +2192,25 @@ async def delete_session_endpoint(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/openalex/add-to-kb")
-async def add_openalex_to_knowledge_base(payload: Dict[str, Any]):
-    file_url = str(payload.get("pdf_url") or payload.get("content_url") or "").strip()
-    if not file_url.startswith("http"):
-        raise HTTPException(status_code=400, detail="No valid PDF/content URL provided")
-    title = str(payload.get("title") or payload.get("openalex_id") or "openalex_paper")
-    return await add_openalex_file_to_kb(file_url=file_url, title=title, fast=bool(payload.get("fast", False)))
+async def _submit_openalex_ingestion(payload: OpenAlexIngestionRequest) -> IngestionTaskResponse:
+    task = await add_openalex_file_to_kb(
+        file_url=payload.pdf_url,
+        title=payload.title,
+        fast=payload.fast,
+    )
+    return IngestionTaskResponse(**task)
+
+
+@app.post("/ingestion/openalex", response_model=IngestionTaskResponse)
+async def submit_openalex_ingestion(payload: OpenAlexIngestionRequest):
+    """Queue the explicit OA PDF behind an OpenAlex result or chat source."""
+    return await _submit_openalex_ingestion(payload)
+
+
+@app.post("/openalex/add-to-kb", response_model=IngestionTaskResponse, deprecated=True)
+async def add_openalex_to_knowledge_base(payload: OpenAlexIngestionRequest):
+    """Backward-compatible alias for the OpenAlex ingestion endpoint."""
+    return await _submit_openalex_ingestion(payload)
 
 
 @app.post("/ingestion/tasks", response_model=IngestionTaskResponse)

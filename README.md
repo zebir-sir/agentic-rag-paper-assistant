@@ -116,6 +116,10 @@
 
 一次选择多篇 PDF，查看进度并调整队列。完整入库会处理正文、算法、表格与图片；快速入库只处理正文。任务可以暂停、恢复或删除。
 
+在对话中启用 OpenAlex 后，返回的论文若带有明确的开放获取 PDF，展开“查看依据”即可直接加入同一入库队列；只有元数据、摘要或落地页链接的结果不会显示入库操作。
+
+接口也可直接调用：`POST /ingestion/openalex`，请求体为 `{"title":"论文标题","pdf_url":"https://.../paper.pdf","openalex_id":"https://openalex.org/...","fast":false}`。返回值是标准入库任务，可通过 `/ingestion/tasks/{task_id}` 查询进度；旧的 `/openalex/add-to-kb` 地址仍保留兼容。
+
 ---
 
 ## 🏗 系统架构

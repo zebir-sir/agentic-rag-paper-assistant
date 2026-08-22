@@ -190,4 +190,4 @@ async def add_openalex_file_to_kb(file_url: str, title: str, *, fast: bool = Fal
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"OpenAlex PDF download failed: {exc}") from exc
     task = await _enqueue_file(target_path, fast=fast)
-    return {"status": "queued", "task_id": task["task_id"], "file_path": str(target_path), "fast": fast}
+    return task
